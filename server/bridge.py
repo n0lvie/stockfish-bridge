@@ -38,8 +38,19 @@ DASHBOARD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashbo
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 STOCKFISH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "stockfish.exe" if platform.system() == "Windows" else "stockfish")
 
-async def process_http_request(path: str, request_headers: Any) -> Optional[tuple]:
-                                                                               
+async def process_http_request(*args, **kwargs) -> Optional[tuple]:
+    if len(args) >= 2:
+        first, second = args[0], args[1]
+    else:
+        return None
+
+    if isinstance(first, str):
+        path = first
+        request_headers = second
+    else:
+        path = getattr(second, "path", "")
+        request_headers = getattr(second, "headers", None)
+
     clean_path = path.split("?")[0]
 
     if clean_path in ("/ws", "/ws_dashboard"):
