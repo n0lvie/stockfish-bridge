@@ -18,6 +18,7 @@ const Bridge = {
   _makeMoveCallback: null,
   _debounceTimer: null,
   _STATE_DEBOUNCE_MS: 100,
+  _connectCallback: null,
 
   
   init(site) {
@@ -99,6 +100,13 @@ const Bridge = {
 
       case 'connected':
         this.setConnected(data.connected);
+        if (data.connected && this._connectCallback) {
+          try {
+            this._connectCallback();
+          } catch (e) {
+            console.error('[StockfishBridge] Error in connect callback:', e);
+          }
+        }
         break;
 
       case 'autoplay_changed':
@@ -107,12 +115,25 @@ const Bridge = {
         break;
 
       case 'error':
+        this.setConnected(false);
         console.error('[StockfishBridge] Server error:', data.message);
         break;
 
       default:
         console.log('[StockfishBridge] Unknown message type:', data.type);
     }
+  },
+
+  onConnect(fn) {
+    this._connectCallback = fn;
+    chrome.runtime.sendMessage(
+      { target: 'background', type: 'register', site: this._site },
+      (response) => {
+        if (response && response.connected) {
+          try { fn(); } catch(e) {}
+        }
+      }
+    );
   },
 
   

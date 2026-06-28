@@ -52,10 +52,13 @@
     currentGameId = urlMatch ? (urlMatch[1] || urlMatch[2]) : 'live-' + Date.now();
 
     
-    const tc = detectTimeControl();
-    Bridge.sendInit(currentGameId, ourColor, tc.timeControl, tc.increment);
+    Bridge.onConnect(() => {
+      console.log('[StockfishBridge] Connection active, sending init and forcing state sync...');
+      const tc = detectTimeControl();
+      Bridge.sendInit(currentGameId, ourColor, tc.timeControl, tc.increment);
+      sendCurrentState(true);
+    });
 
-    
     observer = new MutationObserver(onBoardChange);
     observer.observe(boardEl, {
       childList: true,
@@ -64,7 +67,6 @@
       attributeFilter: ['class', 'style']
     });
 
-    
     try {
       if (boardEl.shadowRoot) {
         observer.observe(boardEl.shadowRoot, {
@@ -78,12 +80,9 @@
       
     }
 
-    
     clockInterval = setInterval(updateClocks, CLOCK_POLL_MS);
 
     pollTimer = setInterval(() => sendCurrentState(true), STATE_POLL_MS);
-
-    setTimeout(() => sendCurrentState(true), 500);
 
     
     detectGameState();
@@ -126,7 +125,8 @@
     const board = Array(8).fill(null).map(() => Array(8).fill(null));
 
     pieces.forEach(el => {
-      const classes = el.className.split(/\s+/);
+      const rawClass = (typeof el.className === 'string') ? el.className : (el.getAttribute('class') || '');
+      const classes = rawClass.split(/\s+/);
       let file = -1, rank = -1, piece = null;
 
       for (const cls of classes) {
@@ -275,7 +275,7 @@
           let lastMoveColor = null;
 
           for (const hl of highlights) {
-            const hClasses = hl.className || '';
+            const hClasses = (typeof hl.className === 'string') ? hl.className : (hl.getAttribute('class') || '');
             const sqMatch = hClasses.match(/square-(\d)(\d)/);
             if (sqMatch) {
               const file = parseInt(sqMatch[1]) - 1;
@@ -309,7 +309,7 @@
       }
       if (docHighlights.length > 0) {
         const lastHighlight = docHighlights[docHighlights.length - 1];
-        const hClasses = lastHighlight.className || '';
+        const hClasses = (typeof lastHighlight.className === 'string') ? lastHighlight.className : (lastHighlight.getAttribute('class') || '');
         const sqMatch = hClasses.match(/square-(\d)(\d)/);
         if (sqMatch) {
           const rank = parseInt(sqMatch[2]);
