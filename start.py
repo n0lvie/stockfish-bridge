@@ -20,17 +20,22 @@ def log_error(message):
 
 def check_and_install_dependencies():
     log("Проверка библиотек Python...")
-    try:
-        import websockets
-        log_success("Библиотека websockets уже установлена.")
-    except ImportError:
-        log("Установка websockets...")
+    missing = []
+    for pkg in ["websockets", "psutil"]:
         try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "websockets"])
-            log_success("Библиотека websockets успешно установлена.")
+            __import__(pkg)
+            log_success(f"Библиотека {pkg} уже установлена.")
+        except ImportError:
+            missing.append(pkg)
+
+    if missing:
+        log(f"Установка {', '.join(missing)}...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
+            log_success(f"Библиотеки {', '.join(missing)} успешно установлены.")
         except Exception as e:
-            log_error(f"Не удалось установить websockets через pip: {e}")
-            log("Попробуйте вручную запустить: pip install websockets")
+            log_error(f"Не удалось установить зависимости через pip: {e}")
+            log(f"Попробуйте вручную запустить: pip install {' '.join(missing)}")
             sys.exit(1)
 
 def detect_termux():

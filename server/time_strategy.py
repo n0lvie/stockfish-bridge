@@ -75,7 +75,7 @@ class TimeStrategy:
 
         allocated += increment_ms // 2
 
-        hard_cap = int(usable * self.max_time_fraction)
+        hard_cap = int(usable * 0.5)
         allocated = min(allocated, hard_cap)
 
         allocated = max(allocated, 0)

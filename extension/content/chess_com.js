@@ -8,13 +8,16 @@
   let observer = null;
   let clockInterval = null;
   let currentGameId = null;
-  let ourColor = null; 
+  let ourColor = null;
   let gameActive = false;
   let lastSentFen = null;
+  let lastSentTurn = null;
   let debounceTimer = null;
-  const DEBOUNCE_MS = 50;
-  const CLOCK_POLL_MS = 100;
+  let pollTimer = null;
+  const DEBOUNCE_MS = 80;
+  const CLOCK_POLL_MS = 200;
   const BOARD_POLL_MS = 500;
+  const STATE_POLL_MS = 1000;
 
   
 
@@ -78,8 +81,9 @@
     
     clockInterval = setInterval(updateClocks, CLOCK_POLL_MS);
 
-    
-    setTimeout(() => sendCurrentState(), 500);
+    pollTimer = setInterval(() => sendCurrentState(true), STATE_POLL_MS);
+
+    setTimeout(() => sendCurrentState(true), 500);
 
     
     detectGameState();
@@ -166,15 +170,14 @@
       if (r > 0) fen += '/';
     }
 
-    
-    const activeColor = isOurTurn()
+    const ourTurn = isOurTurn();
+    const activeColor = ourTurn
       ? (ourColor === 'white' ? 'w' : 'b')
       : (ourColor === 'white' ? 'b' : 'w');
 
-    
     fen += ` ${activeColor} KQkq - 0 1`;
 
-    return fen;
+    return { fen, ourTurn };
   }
 
   
@@ -231,21 +234,52 @@
   
   function isOurTurn() {
     try {
-      
-      const containers = document.querySelectorAll(
-        '.clock-component, [class*="clock-container"]'
-      );
-      if (containers.length < 2) return false;
+      const bottomClock = document.querySelector('.clock-bottom .clock-component, .clock-component.clock-bottom');
+      const topClock = document.querySelector('.clock-top .clock-component, .clock-component.clock-top');
 
-      const sorted = Array.from(containers).sort((a, b) => {
-        return b.getBoundingClientRect().top - a.getBoundingClientRect().top;
-      });
-      const bottomContainer = sorted[0];
+      if (bottomClock && topClock) {
+        if (bottomClock.classList.contains('clock-player-turn')) return true;
+        if (topClock.classList.contains('clock-player-turn')) return false;
 
-      
-      return bottomContainer.classList.contains('clock-player-turn') ||
-        !bottomContainer.classList.contains('clock-inactive') ||
-        bottomContainer.querySelector('.clock-player-turn') !== null;
+        if (!bottomClock.classList.contains('clock-inactive') &&
+             topClock.classList.contains('clock-inactive')) return true;
+        if (bottomClock.classList.contains('clock-inactive') &&
+            !topClock.classList.contains('clock-inactive')) return false;
+      }
+
+      const containers = document.querySelectorAll('.clock-component, [class*="clock-container"]');
+      if (containers.length >= 2) {
+        const sorted = Array.from(containers).sort((a, b) =>
+          b.getBoundingClientRect().top - a.getBoundingClientRect().top
+        );
+        const bottom = sorted[0];
+        const top = sorted[sorted.length - 1];
+
+        if (bottom.classList.contains('clock-player-turn')) return true;
+        if (top.classList.contains('clock-player-turn')) return false;
+
+        const bottomActive = bottom.querySelector('.clock-player-turn, [class*="clock-active"]');
+        if (bottomActive) return true;
+        const topActive = top.querySelector('.clock-player-turn, [class*="clock-active"]');
+        if (topActive) return false;
+      }
+
+      const highlights = document.querySelectorAll('.highlight');
+      if (highlights.length > 0) {
+        const lastHighlight = highlights[highlights.length - 1];
+        const hClasses = lastHighlight.className || '';
+        const sqMatch = hClasses.match(/square-(\d)(\d)/);
+        if (sqMatch) {
+          const rank = parseInt(sqMatch[2]);
+          if (ourColor === 'white') {
+            return rank >= 3 && rank <= 6 ? true : rank >= 7;
+          } else {
+            return rank <= 4 && rank >= 3 ? true : rank <= 2;
+          }
+        }
+      }
+
+      return false;
     } catch (e) {
       return false;
     }
@@ -292,15 +326,18 @@
   }
 
   
-  function sendCurrentState() {
+  function sendCurrentState(force) {
     try {
-      const fen = readBoardFEN();
-      if (!fen) return;
-      if (fen === lastSentFen) return;
+      const result = readBoardFEN();
+      if (!result) return;
+      const { fen, ourTurn } = result;
+
+      if (!force && fen === lastSentFen && ourTurn === lastSentTurn) return;
+
       lastSentFen = fen;
+      lastSentTurn = ourTurn;
 
       const clocks = readClocks();
-      const ourTurn = isOurTurn();
 
       Bridge.sendState(
         fen,
@@ -485,19 +522,12 @@
 
   
   function cleanup() {
-    if (observer) {
-      observer.disconnect();
-      observer = null;
-    }
-    if (clockInterval) {
-      clearInterval(clockInterval);
-      clockInterval = null;
-    }
-    if (debounceTimer) {
-      clearTimeout(debounceTimer);
-      debounceTimer = null;
-    }
+    if (observer) { observer.disconnect(); observer = null; }
+    if (clockInterval) { clearInterval(clockInterval); clockInterval = null; }
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
     lastSentFen = null;
+    lastSentTurn = null;
   }
 
   
