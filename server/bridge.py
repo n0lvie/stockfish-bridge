@@ -14,17 +14,16 @@ import logging
 import platform
 import subprocess
 import shutil
-import http
 import mimetypes
 import base64
 import argparse
 from typing import Optional, Dict, Any
 
 import websockets
-try:
-    from websockets.asyncio.server import serve as ws_serve
-except ImportError:
-    from websockets import serve as ws_serve
+import websockets.exceptions
+from websockets.asyncio.server import serve as ws_serve, ServerConnection
+from websockets.http11 import Request, Response
+from websockets.datastructures import Headers
 
 from config import DEFAULT_CONFIG, detect_cpu_count
 from engine import StockfishEngine
@@ -38,53 +37,37 @@ DASHBOARD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashbo
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 STOCKFISH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "stockfish.exe" if platform.system() == "Windows" else "stockfish")
 
-async def process_http_request(*args, **kwargs) -> Optional[tuple]:
-    if len(args) >= 2:
-        first, second = args[0], args[1]
-    else:
-        return None
-
-    if isinstance(first, str):
-        path = first
-        request_headers = second
-    else:
-        path = getattr(second, "path", "")
-        request_headers = getattr(second, "headers", None)
-
+async def process_http_request(connection: ServerConnection, request: Request) -> Optional[Response]:
+    path = request.path
     clean_path = path.split("?")[0]
 
     if clean_path in ("/ws", "/ws_dashboard"):
         return None
-        
+
     if clean_path == "/" or clean_path == "":
         clean_path = "/index.html"
-        
+
     local_file = os.path.normpath(os.path.join(DASHBOARD_DIR, clean_path.lstrip("/")))
 
     if not local_file.startswith(DASHBOARD_DIR):
-        body = b"403 Forbidden"
-        return http.HTTPStatus.FORBIDDEN, [("Content-Type", "text/plain")], body
-        
+        return Response(403, "Forbidden", Headers([("Content-Type", "text/plain")]), b"403 Forbidden")
+
     if os.path.exists(local_file) and os.path.isfile(local_file):
         try:
             with open(local_file, "rb") as f:
                 content = f.read()
             mime_type, _ = mimetypes.guess_type(local_file)
             mime_type = mime_type or "application/octet-stream"
-            
-            headers = [
+            headers = Headers([
                 ("Content-Type", mime_type),
                 ("Content-Length", str(len(content))),
-                ("Connection", "close")
-            ]
-            return http.HTTPStatus.OK, headers, content
+            ])
+            return Response(200, "OK", headers, content)
         except Exception as e:
             logger.error(f"Error reading file {local_file}: {e}")
-            body = b"500 Internal Server Error"
-            return http.HTTPStatus.INTERNAL_SERVER_ERROR, [("Content-Type", "text/plain")], body
-            
-    body = b"404 Not Found"
-    return http.HTTPStatus.NOT_FOUND, [("Content-Type", "text/plain")], body
+            return Response(500, "Internal Server Error", Headers([("Content-Type", "text/plain")]), b"500 Internal Server Error")
+
+    return Response(404, "Not Found", Headers([("Content-Type", "text/plain")]), b"404 Not Found")
 
 class ChessBridge:
     def __init__(self, args):
@@ -202,9 +185,9 @@ class ChessBridge:
             self._engine = None
 
     async def ws_handler(self, websocket):
-        path = websocket.request_uri if hasattr(websocket, "request_uri") else websocket.path
+        path = websocket.request.path if hasattr(websocket, "request") and websocket.request else "/ws"
         clean_path = path.split("?")[0]
-        
+
         if clean_path == "/ws_dashboard":
             await self._dashboard_handler(websocket)
         else:
@@ -437,7 +420,7 @@ class ChessBridge:
                                                                     
                         if self._autoplay:
                                                                                                
-                            success = await asyncio.get_event_loop().run_in_executor(
+                            success = await asyncio.get_running_loop().run_in_executor(
                                 None,
                                 control_module.execute_move,
                                 best_move,
@@ -543,7 +526,7 @@ class ChessBridge:
         if cmd == "screenshot":
             logger.info("Grab screenshot requested.")
                                                                    
-            img, left, top = await asyncio.get_event_loop().run_in_executor(
+            img, left, top = await asyncio.get_running_loop().run_in_executor(
                 None, BoardDetector.capture_screenshot
             )
 
@@ -570,7 +553,7 @@ class ChessBridge:
             await self._send_cv_state_to_dashboard()
             
         elif cmd == "autodetect":
-            img, left, top = await asyncio.get_event_loop().run_in_executor(
+            img, left, top = await asyncio.get_running_loop().run_in_executor(
                 None, BoardDetector.capture_screenshot
             )
             rect = BoardDetector.auto_detect_board(img)
@@ -593,7 +576,7 @@ class ChessBridge:
         elif cmd == "calibrate":
             if not self._cv_classifier.board_rect:
                 return
-            img, left, top = await asyncio.get_event_loop().run_in_executor(
+            img, left, top = await asyncio.get_running_loop().run_in_executor(
                 None, BoardDetector.capture_screenshot
             )
             success = self._cv_classifier.calibrate(img, self._cv_classifier.board_rect)
@@ -608,7 +591,7 @@ class ChessBridge:
         elif cmd == "test_fen":
             if not self._cv_classifier.is_calibrated:
                 return
-            img, left, top = await asyncio.get_event_loop().run_in_executor(
+            img, left, top = await asyncio.get_running_loop().run_in_executor(
                 None, BoardDetector.capture_screenshot
             )
             fen = self._cv_classifier.get_board_fen(img, self._active_color)
@@ -638,7 +621,7 @@ class ChessBridge:
                 
             try:
                                 
-                img, left, top = await asyncio.get_event_loop().run_in_executor(
+                img, left, top = await asyncio.get_running_loop().run_in_executor(
                     None, BoardDetector.capture_screenshot
                 )
 
@@ -674,11 +657,14 @@ class ChessBridge:
 
     @staticmethod
     async def _send(ws, data):
-        if ws and ws.readyState == WebSocket.OPEN:
-            try:
-                await ws.send(json.dumps(data))
-            except Exception:
-                pass
+        if ws is None:
+            return
+        try:
+            await ws.send(json.dumps(data))
+        except websockets.exceptions.ConnectionClosed:
+            pass
+        except Exception as e:
+            logger.debug(f"_send error: {e}")
 
     async def run(self):
                                              
