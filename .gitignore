@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.gemini/
+.system_generated/
+*.log
+temp/
+scratch/
+.idea/
+.vscode/
+*.png
+!extension/icons/*.png
+.agents/
+server/bin/
+server/settings.json
+.pytest_cache/

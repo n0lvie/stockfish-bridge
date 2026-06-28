@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stockfish Bridge</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+
+    <!-- Header -->
+    <header class="popup-header">
+      <div class="header-left">
+        <div class="logo-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+            <path d="M12 2C8 2 6 4 6 6c0 1.5.5 2.5 1 3L5 14l2 1-1 4h4v3h4v-3h4l-1-4 2-1-2-5c.5-.5 1-1.5 1-3 0-2-2-4-6-4z" 
+                  fill="currentColor" opacity="0.9"/>
+            <circle cx="10" cy="7" r="1" fill="rgba(15,15,25,0.7)"/>
+          </svg>
+        </div>
+        <div class="header-text">
+          <h1>Stockfish Bridge</h1>
+          <span class="version">v1.0.0</span>
+        </div>
+      </div>
+      <div class="connection-badge" id="connectionBadge">
+        <span class="status-dot" id="statusDot"></span>
+        <span class="status-text" id="statusText">Disconnected</span>
+      </div>
+    </header>
+
+    <!-- Server Configuration -->
+    <section class="section server-section">
+      <div class="section-header">
+        <span class="section-icon">⚡</span>
+        <span class="section-title">Server</span>
+      </div>
+      <div class="server-input-group">
+        <input type="text" id="serverUrl" class="server-input" 
+               placeholder="ws://localhost:9999" value="ws://localhost:9999"
+               spellcheck="false" autocomplete="off">
+        <button id="connectBtn" class="btn-connect" title="Connect">
+          <span class="btn-icon" id="connectBtnIcon">⟳</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- Game Info -->
+    <section class="section game-section">
+      <div class="section-header">
+        <span class="section-icon">♟</span>
+        <span class="section-title">Game</span>
+      </div>
+      <div class="info-grid">
+        <div class="info-item">
+          <span class="info-label">Site</span>
+          <span class="info-value" id="gameSite">—</span>
+        </div>
+        <div class="info-item">
+          <span class="info-label">Color</span>
+          <span class="info-value" id="gameColor">—</span>
+        </div>
+        <div class="info-item">
+          <span class="info-label">Game ID</span>
+          <span class="info-value mono" id="gameId">—</span>
+        </div>
+        <div class="info-item">
+          <span class="info-label">Turn</span>
+          <span class="info-value" id="gameTurn">—</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Clocks -->
+    <section class="section clocks-section">
+      <div class="section-header">
+        <span class="section-icon">⏱</span>
+        <span class="section-title">Clocks</span>
+      </div>
+      <div class="clocks-row">
+        <div class="clock-display ours">
+          <span class="clock-label">You</span>
+          <span class="clock-value" id="ourClock">—:——</span>
+        </div>
+        <div class="clock-separator">vs</div>
+        <div class="clock-display theirs">
+          <span class="clock-label">Opp</span>
+          <span class="clock-value" id="oppClock">—:——</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Engine Analysis -->
+    <section class="section engine-section">
+      <div class="section-header">
+        <span class="section-icon">🧠</span>
+        <span class="section-title">Engine</span>
+        <span class="engine-status-badge" id="engineStatus">idle</span>
+      </div>
+      <div class="eval-display">
+        <div class="eval-bar-container">
+          <div class="eval-bar" id="evalBar"></div>
+        </div>
+        <span class="eval-score" id="evalScore">0.00</span>
+      </div>
+      <div class="engine-details">
+        <div class="detail-row">
+          <span class="detail-label">Depth</span>
+          <span class="detail-value mono" id="engineDepth">—</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">NPS</span>
+          <span class="detail-value mono" id="engineNps">—</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">Time</span>
+          <span class="detail-value mono" id="engineTime">—</span>
+        </div>
+      </div>
+      <div class="pv-line" id="pvLine" title="Principal variation">—</div>
+    </section>
+
+    <!-- Auto-Play Toggle -->
+    <section class="section autoplay-section">
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <span class="toggle-label">Auto-Play Moves</span>
+          <span class="toggle-description">Automatically execute engine moves</span>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="autoPlayToggle" checked>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+    </section>
+
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stockfish Bridge Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="bg-gradient-glow"></div>
+    
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="logo">
+                <span class="logo-icon">♟</span>
+                <h1>Bridge v2.0</h1>
+            </div>
+            
+            <nav class="nav-menu">
+                <button class="nav-btn active" data-tab="overview">
+                    <span class="btn-icon">📊</span> Overview
+                </button>
+                <button class="nav-btn" data-tab="cv-config">
+                    <span class="btn-icon">👁</span> CV Config
+                </button>
+                <button class="nav-btn" data-tab="settings">
+                    <span class="btn-icon">⚙</span> Settings
+                </button>
+            </nav>
+            
+            <div class="connection-status">
+                <div class="status-indicator disconnected" id="server-status-dot"></div>
+                <div class="status-text">
+                    <div class="label">Server Link</div>
+                    <div class="value" id="server-status-text">Connecting...</div>
+                </div>
+            </div>
+        </aside>
+        
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Tab: Overview -->
+            <section class="tab-content active" id="tab-overview">
+                <header class="tab-header">
+                    <h2>Live Game Monitor</h2>
+                    <p>Real-time analytics and controls for active chess engine matches.</p>
+                </header>
+                
+                <!-- Stats Grid -->
+                <div class="stats-grid">
+                    <div class="stat-card glass">
+                        <div class="icon">📈</div>
+                        <div class="info">
+                            <span class="title">Evaluation</span>
+                            <span class="value" id="stat-eval">0.00</span>
+                        </div>
+                        <div class="eval-bar-container">
+                            <div class="eval-bar" id="eval-bar-fill" style="width: 50%;"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card glass">
+                        <div class="icon">🔬</div>
+                        <div class="info">
+                            <span class="title">Depth / Nodes</span>
+                            <span class="value" id="stat-depth">0 / 0</span>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card glass">
+                        <div class="icon">⚡</div>
+                        <div class="info">
+                            <span class="title">Speed (NPS)</span>
+                            <span class="value" id="stat-nps">0 nps</span>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card glass">
+                        <div class="icon">⏱</div>
+                        <div class="info">
+                            <span class="title">Your Time</span>
+                            <span class="value" id="stat-time">00:00.0</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Main Board Details and PV -->
+                <div class="overview-body">
+                    <div class="panel glass pv-panel">
+                        <h3>Current Move Path (PV)</h3>
+                        <div class="pv-container" id="stat-pv">
+                            No move search in progress.
+                        </div>
+                    </div>
+                    
+                    <div class="panel glass sys-panel">
+                        <h3>System Resource Impact</h3>
+                        <div class="sys-metrics">
+                            <div class="metric">
+                                <div class="metric-header">
+                                    <span>CPU Load</span>
+                                    <span id="metric-cpu-val">0%</span>
+                                </div>
+                                <div class="progress-bar"><div class="progress-fill" id="metric-cpu-fill" style="width: 0%;"></div></div>
+                            </div>
+                            <div class="metric">
+                                <div class="metric-header">
+                                    <span>Memory Usage</span>
+                                    <span id="metric-ram-val">0%</span>
+                                </div>
+                                <div class="progress-bar"><div class="progress-fill" id="metric-ram-fill" style="width: 0%;"></div></div>
+                            </div>
+                            <div class="metric">
+                                <div class="metric-header">
+                                    <span>Active Engine Threads</span>
+                                    <span id="metric-threads-val">1 / 1</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Tab: CV Config -->
+            <section class="tab-content" id="tab-cv-config">
+                <header class="tab-header">
+                    <h2>Computer Vision Visual Setup</h2>
+                    <p>Capture the screen, align the chessboard boundary, and calibrate pieces for visually driven play.</p>
+                </header>
+                
+                <div class="cv-layout">
+                    <!-- Left: Screenshot & Bounding Box Selector -->
+                    <div class="panel glass screen-panel">
+                        <div class="cv-toolbar">
+                            <button class="btn btn-primary" id="btn-screenshot">📸 Grab Screen</button>
+                            <button class="btn btn-secondary" id="btn-autodetect">🔍 Auto-Detect Grid</button>
+                            <button class="btn btn-success" id="btn-calibrate" disabled>🎯 Calibrate Pieces</button>
+                        </div>
+                        
+                        <div class="screenshot-container" id="screenshot-container">
+                            <div class="no-screenshot-placeholder" id="screenshot-placeholder">
+                                Click "Grab Screen" to display desktop capture.
+                            </div>
+                            <img id="screenshot-img" class="screenshot-img" src="" alt="Screenshot" style="display: none;">
+                            <div id="selection-box" class="selection-box" style="display: none;"></div>
+                        </div>
+                    </div>
+                    
+                    <!-- Right: Calibration status -->
+                    <div class="panel glass cv-status-panel">
+                        <h3>CV Calibration Status</h3>
+                        
+                        <div class="cv-fields">
+                            <div class="field">
+                                <span class="label">Board Position:</span>
+                                <span class="value" id="cv-board-rect">Not set</span>
+                            </div>
+                            <div class="field">
+                                <span class="label">Pieces Calibrated:</span>
+                                <span class="value badge badge-red" id="cv-calibrated-badge">No</span>
+                            </div>
+                            <div class="field">
+                                <span class="label">Board Orientation:</span>
+                                <span class="value" id="cv-orientation">Unflipped</span>
+                            </div>
+                            <div class="field">
+                                <span class="label">Current FEN:</span>
+                                <div class="value code" id="cv-current-fen">rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1</div>
+                            </div>
+                        </div>
+                        
+                        <div class="cv-toolbar" style="margin-top: 20px;">
+                            <button class="btn btn-secondary" id="btn-test-fen" disabled>🧪 Test FEN Recognition</button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Tab: Settings -->
+            <section class="tab-content" id="tab-settings">
+                <header class="tab-header">
+                    <h2>Bridge Parameters</h2>
+                    <p>Tweak dynamic power scaling, safety offsets, and manual thread options.</p>
+                </header>
+                
+                <div class="settings-layout panel glass">
+                    <div class="settings-group">
+                        <h3>Play Mode</h3>
+                        <div class="setting-row">
+                            <div class="setting-info">
+                                <label>Automation Mode</label>
+                                <p>Select between DOM Browser extension and visual Computer Vision mode.</p>
+                            </div>
+                            <div class="setting-control">
+                                <select id="setting-mode-select">
+                                    <option value="extension">DOM Chrome Extension</option>
+                                    <option value="cv">Computer Vision (Visual)</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <div class="setting-row">
+                            <div class="setting-info">
+                                <label>Auto-Play Move Execution</label>
+                                <p>Allow the bridge to click/make moves automatically.</p>
+                            </div>
+                            <div class="setting-control">
+                                <label class="switch">
+                                    <input type="checkbox" id="setting-autoplay" checked>
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="settings-group">
+                        <h3>Resource & Power Scaling</h3>
+                        <div class="setting-row">
+                            <div class="setting-info">
+                                <label>Dynamic Resource Allocator</label>
+                                <p>Automatically scale CPU/RAM resources down during winning phases and up when under pressure.</p>
+                            </div>
+                            <div class="setting-control">
+                                <select id="setting-allocator-select">
+                                    <option value="auto">Auto (Adaptive priority scaling)</option>
+                                    <option value="manual">Manual (Static constraints)</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <!-- Manual settings (displayed only in manual allocator mode) -->
+                        <div id="manual-allocator-settings" style="display: none;">
+                            <div class="setting-row">
+                                <div class="setting-info">
+                                    <label>Search Threads Limit</label>
+                                    <p>Max CPU logical cores allowed for Stockfish search.</p>
+                                </div>
+                                <div class="setting-control range-control">
+                                    <input type="range" id="setting-threads-slider" min="1" max="16" value="2">
+                                    <span class="range-val" id="setting-threads-val">2</span>
+                                </div>
+                            </div>
+                            <div class="setting-row">
+                                <div class="setting-info">
+                                    <label>Hash Buffer (MB)</label>
+                                    <p>RAM size allocated for the engine's transposition table.</p>
+                                </div>
+                                <div class="setting-control range-control">
+                                    <input type="range" id="setting-hash-slider" min="64" max="8192" step="64" value="256">
+                                    <span class="range-val" id="setting-hash-val">256 MB</span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Auto settings (displayed in auto allocator mode) -->
+                        <div id="auto-allocator-settings">
+                            <div class="setting-row">
+                                <div class="setting-info">
+                                    <label>Engine Quality / Depth Scale</label>
+                                    <p>Multiplier for maximum threads and search budget. Higher = deeper calculation, Lower = energy savings.</p>
+                                </div>
+                                <div class="setting-control range-control">
+                                    <input type="range" id="setting-quality-slider" min="0.1" max="3.0" step="0.1" value="1.0">
+                                    <span class="range-val" id="setting-quality-val">1.0x</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="settings-group">
+                        <h3>Safety & Clock Parameters</h3>
+                        <div class="setting-row">
+                            <div class="setting-info">
+                                <label>Safety Clock Buffer (ms)</label>
+                                <p>Reserve time kept on our clock to prevent losing on time due to network lag.</p>
+                            </div>
+                            <div class="setting-control">
+                                <input type="number" id="setting-safety-buffer" value="2000" min="500" max="10000" step="100">
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="settings-actions">
+                        <button class="btn btn-primary" id="btn-save-settings">💾 Apply Settings</button>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

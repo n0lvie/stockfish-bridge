@@ -1,0 +1,406 @@
+
+
+(function () {
+  'use strict';
+
+  
+  if (window.location.hostname.includes('chess.com') || window.location.hostname.includes('lichess.org')) {
+    return;
+  }
+
+  const SITE = 'generic-chess';
+  let boardEl = null;
+  let observer = null;
+  let clockInterval = null;
+  let currentGameId = null;
+  let ourColor = 'white';
+  let gameActive = false;
+  let lastSentFen = null;
+  let debounceTimer = null;
+  const DEBOUNCE_MS = 50;
+  const CLOCK_POLL_MS = 250;
+  const BOARD_POLL_MS = 1000;
+
+  function init() {
+    console.log('[StockfishBridge] Generic chess adapter loaded. Scanning page...');
+    waitForBoard();
+  }
+
+  
+  function findBoardElement() {
+    
+    const selectors = [
+      'cg-board', 'chess-board', 'wc-chess-board', '.chessboard', '#chessboard',
+      '.chess-board', '.board-container', '[class*="chess-board"]', '[class*="chessboard"]'
+    ];
+    
+    for (const selector of selectors) {
+      try {
+        const el = document.querySelector(selector);
+        if (el && el.getBoundingClientRect().width > 150) {
+          return el;
+        }
+      } catch (e) {}
+    }
+    
+    
+    const divs = document.querySelectorAll('div');
+    for (const div of divs) {
+      const rect = div.getBoundingClientRect();
+      if (rect.width > 200 && Math.abs(rect.width - rect.height) < 10) {
+        
+        const pieces = div.querySelectorAll('[class*="piece"], [class*="pawn"], [class*="king"], img[src*="piece"]');
+        if (pieces.length >= 8) {
+          return div;
+        }
+      }
+    }
+    return null;
+  }
+
+  function waitForBoard() {
+    const check = () => {
+      boardEl = findBoardElement();
+      if (boardEl) {
+        console.log('[StockfishBridge] Chess board detected:', boardEl);
+        setupMonitoring();
+      } else {
+        setTimeout(check, BOARD_POLL_MS);
+      }
+    };
+    check();
+  }
+
+  function setupMonitoring() {
+    Bridge.init(SITE);
+    Bridge.setMakeMoveCallback(makeMove);
+    
+    detectColor();
+    gameActive = true;
+    currentGameId = 'generic-' + window.location.hostname + '-' + Date.now();
+    
+    
+    Bridge.sendInit(currentGameId, ourColor, 0, 0);
+
+    
+    observer = new MutationObserver(onBoardChange);
+    observer.observe(boardEl, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['class', 'style', 'transform']
+    });
+
+    
+    clockInterval = setInterval(updateClocks, CLOCK_POLL_MS);
+
+    
+    setTimeout(sendCurrentState, 500);
+    
+    
+    setInterval(() => {
+      const activeBoard = findBoardElement();
+      if (activeBoard && activeBoard !== boardEl) {
+        console.log('[StockfishBridge] Board change detected. Re-initializing...');
+        cleanup();
+        boardEl = activeBoard;
+        setupMonitoring();
+      }
+    }, 3000);
+  }
+
+  function detectColor() {
+    
+    
+    
+    const pieces = findPieceElements();
+    if (pieces.length === 0) {
+      ourColor = 'white';
+      return;
+    }
+
+    const boardRect = boardEl.getBoundingClientRect();
+    let bottomRowPieces = [];
+    
+    pieces.forEach(p => {
+      const pRect = p.getBoundingClientRect();
+      const relativeY = pRect.top + pRect.height/2 - boardRect.top;
+      
+      if (relativeY > boardRect.height * 0.85) {
+        bottomRowPieces.push(p);
+      }
+    });
+
+    
+    let whiteCount = 0;
+    let blackCount = 0;
+    
+    bottomRowPieces.forEach(p => {
+      const char = identifyPieceType(p);
+      if (char) {
+        if (char === char.toUpperCase()) whiteCount++;
+        else blackCount++;
+      }
+    });
+
+    ourColor = whiteCount >= blackCount ? 'white' : 'black';
+  }
+
+  function findPieceElements() {
+    
+    let pieces = boardEl.querySelectorAll(
+      'piece, [class*="piece"], [class*="pawn"], img[src*="piece"], svg[class*="piece"]'
+    );
+    
+    return Array.from(pieces).filter(el => {
+      const cls = el.className.toString();
+      return !cls.includes('ghost') && !cls.includes('highlight') && !cls.includes('hint');
+    });
+  }
+
+  function identifyPieceType(el) {
+    const classes = el.className.toString().toLowerCase();
+    const src = (el.src || el.getAttribute('src') || '').toLowerCase();
+    
+    let color = null;
+    let type = null;
+
+    
+    if (classes.includes('white') || classes.includes('wp') || classes.includes('wn') || 
+        classes.includes('wb') || classes.includes('wr') || classes.includes('wq') || 
+        classes.includes('wk') || src.includes('/w') || src.includes('white')) {
+      color = 'w';
+    } else if (classes.includes('black') || classes.includes('bp') || classes.includes('bn') || 
+               classes.includes('bb') || classes.includes('br') || classes.includes('bq') || 
+               classes.includes('bk') || src.includes('/b') || src.includes('black')) {
+      color = 'b';
+    }
+
+    
+    const mappings = {
+      pawn: 'p', rook: 'r', knight: 'n', bishop: 'b', queen: 'q', king: 'k',
+      wp: 'p', wn: 'n', wb: 'b', wr: 'r', wq: 'q', wk: 'k',
+      bp: 'p', bn: 'n', bb: 'b', br: 'r', bq: 'q', bk: 'k'
+    };
+
+    for (const [key, val] of Object.entries(mappings)) {
+      if (classes.includes(key) || src.includes(key)) {
+        type = val;
+        break;
+      }
+    }
+    
+    
+    if (!type) {
+      const match = classes.match(/\b([wb])([pnbrqk])\b/);
+      if (match) {
+        color = match[1];
+        type = match[2];
+      }
+    }
+
+    if (color && type) {
+      return color === 'w' ? type.toUpperCase() : type.toLowerCase();
+    }
+    return null;
+  }
+
+  function readBoardFEN() {
+    if (!boardEl) return null;
+    const pieces = findPieceElements();
+    if (pieces.length === 0) return null;
+
+    const board = Array(8).fill(null).map(() => Array(8).fill(null));
+    const boardRect = boardEl.getBoundingClientRect();
+    const isFlipped = ourColor === 'black';
+
+    pieces.forEach(el => {
+      const pieceChar = identifyPieceType(el);
+      if (!pieceChar) return;
+
+      const pRect = el.getBoundingClientRect();
+      const relativeX = pRect.left + pRect.width/2 - boardRect.left;
+      const relativeY = pRect.top + pRect.height/2 - boardRect.top;
+
+      let file = Math.floor(relativeX / (boardRect.width / 8));
+      let rank = Math.floor(relativeY / (boardRect.height / 8));
+
+      
+      file = Math.max(0, Math.min(7, file));
+      rank = Math.max(0, Math.min(7, rank));
+
+      
+      
+      if (isFlipped) {
+        file = 7 - file;
+        
+      } else {
+        rank = 7 - rank;
+      }
+
+      if (file >= 0 && file < 8 && rank >= 0 && rank < 8) {
+        board[rank][file] = pieceChar;
+      }
+    });
+
+    
+    let fen = '';
+    for (let r = 7; r >= 0; r--) {
+      let empty = 0;
+      for (let f = 0; f < 8; f++) {
+        if (board[r][f]) {
+          if (empty > 0) {
+            fen += empty;
+            empty = 0;
+          }
+          fen += board[r][f];
+        } else {
+          empty++;
+        }
+      }
+      if (empty > 0) fen += empty;
+      if (r > 0) fen += '/';
+    }
+
+    
+    const turn = isOurTurn() ? (ourColor === 'white' ? 'w' : 'b') : (ourColor === 'white' ? 'b' : 'w');
+    fen += ` ${turn} KQkq - 0 1`;
+    return fen;
+  }
+
+  function readClocks() {
+    
+    let times = [];
+    const elements = document.querySelectorAll('div, span, p, .clock, .timer');
+    
+    elements.forEach(el => {
+      if (el.children.length === 0) {
+        const text = el.textContent.trim();
+        if (/^\d+:\d{2}(\.\d+)?$/.test(text)) {
+          const rect = el.getBoundingClientRect();
+          times.push({ text, top: rect.top });
+        }
+      }
+    });
+
+    let ourTimeMs = 0;
+    let oppTimeMs = 0;
+
+    if (times.length >= 2) {
+      
+      times.sort((a, b) => b.top - a.top);
+      ourTimeMs = parseTimeString(times[0].text);
+      oppTimeMs = parseTimeString(times[1].text);
+    }
+    return { ourTimeMs, oppTimeMs };
+  }
+
+  function isOurTurn() {
+    
+    
+    
+    
+    return true; 
+  }
+
+  function onBoardChange() {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(sendCurrentState, DEBOUNCE_MS);
+  }
+
+  function sendCurrentState() {
+    try {
+      const fen = readBoardFEN();
+      if (!fen || fen === lastSentFen) return;
+      lastSentFen = fen;
+
+      const clocks = readClocks();
+      Bridge.sendState(
+        fen,
+        clocks.ourTimeMs,
+        clocks.oppTimeMs,
+        isOurTurn(),
+        null,
+        0,
+        0
+      );
+    } catch (e) {
+      console.error('[StockfishBridge] Error sending state:', e);
+    }
+  }
+
+  function updateClocks() {
+    const clocks = readClocks();
+    if (clocks.ourTimeMs > 0 || clocks.oppTimeMs > 0) {
+      Bridge.sendClockUpdate(clocks.ourTimeMs, clocks.oppTimeMs);
+    }
+  }
+
+  function makeMove(uci, from, to, promotion) {
+    console.log('[StockfishBridge] Generic execution: ', uci);
+    if (!boardEl) return false;
+
+    const rect = boardEl.getBoundingClientRect();
+    const squareSize = rect.width / 8;
+    const isFlipped = ourColor === 'black';
+
+    const fromCoords = getSquareCenter(from, squareSize, isFlipped, rect);
+    const toCoords = getSquareCenter(to, squareSize, isFlipped, rect);
+
+    const target = document.elementFromPoint(fromCoords.x, fromCoords.y) || boardEl;
+
+    
+    simulatePointerEvent('pointerdown', target, fromCoords.x, fromCoords.y);
+    simulateMouseEvent('mousedown', target, fromCoords.x, fromCoords.y);
+
+    setTimeout(() => {
+      simulatePointerEvent('pointermove', boardEl, toCoords.x, toCoords.y);
+      simulateMouseEvent('mousemove', boardEl, toCoords.x, toCoords.y);
+
+      setTimeout(() => {
+        const destTarget = document.elementFromPoint(toCoords.x, toCoords.y) || boardEl;
+        simulatePointerEvent('pointerup', destTarget, toCoords.x, toCoords.y);
+        simulateMouseEvent('mouseup', destTarget, toCoords.x, toCoords.y);
+
+        if (promotion) {
+          
+          setTimeout(() => {
+            const promoDialog = document.querySelector('[class*="promotion"], #promotion-choice');
+            if (promoDialog) {
+              const promoChoice = promoDialog.querySelector('piece, square, div');
+              if (promoChoice) promoChoice.click();
+            }
+          }, 250);
+        }
+      }, 50);
+    }, 50);
+
+    return true;
+  }
+
+  function getSquareCenter(square, squareSize, isFlipped, boardRect) {
+    const { file, rank } = squareToFileRank(square);
+    let x, y;
+
+    if (isFlipped) {
+      x = boardRect.left + (7 - file) * squareSize + squareSize / 2;
+      y = boardRect.top + rank * squareSize + squareSize / 2;
+    } else {
+      x = boardRect.left + file * squareSize + squareSize / 2;
+      y = boardRect.top + (7 - rank) * squareSize + squareSize / 2;
+    }
+    return { x, y };
+  }
+
+  function cleanup() {
+    if (observer) observer.disconnect();
+    if (clockInterval) clearInterval(clockInterval);
+  }
+
+  
+  if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    init();
+  } else {
+    window.addEventListener('load', init);
+  }
+})();
