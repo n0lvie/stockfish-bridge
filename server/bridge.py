@@ -38,11 +38,12 @@ SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settin
 STOCKFISH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "stockfish.exe" if platform.system() == "Windows" else "stockfish")
 
 async def process_http_request(connection: ServerConnection, request: Request) -> Optional[Response]:
+    upgrade = request.headers.get("Upgrade", "").lower()
+    if upgrade == "websocket":
+        return None
+
     path = request.path
     clean_path = path.split("?")[0]
-
-    if clean_path in ("/ws", "/ws_dashboard"):
-        return None
 
     if clean_path == "/" or clean_path == "":
         clean_path = "/index.html"
