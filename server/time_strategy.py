@@ -1,4 +1,4 @@
-utf-8"""
+"""
 Adaptive time management strategy for the Stockfish Chess Bridge.
 
 Core rule

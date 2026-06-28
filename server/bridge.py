@@ -1,4 +1,4 @@
-utf-8"""
+"""
 Stockfish Chess Bridge v2.0 – WebSocket Server & Orchestrator.
 
 Combines Chrome Extension bridging, CV visual automation, 

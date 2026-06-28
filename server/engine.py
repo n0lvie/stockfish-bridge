@@ -1,4 +1,4 @@
-utf-8"""
+"""
 Async Stockfish UCI wrapper for the Chess Bridge server.
 
 Manages a Stockfish subprocess via the Universal Chess Interface (UCI)
