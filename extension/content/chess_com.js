@@ -264,7 +264,7 @@
         if (topActive) return false;
       }
 
-      // Highlight-based detection (works inside shadow DOM too)
+      
       if (boardEl) {
         let highlights = Array.from(boardEl.querySelectorAll('.highlight'));
         if (highlights.length === 0 && boardEl.shadowRoot) {
@@ -297,12 +297,12 @@
             return ourColor === nextTurn;
           }
         } else {
-          // No highlights means game start - White's turn
+          
           return ourColor === 'white';
         }
       }
 
-      // Final fallback using querySelectorAll on the whole document for highlights
+      
       let docHighlights = Array.from(document.querySelectorAll('.highlight'));
       if (docHighlights.length === 0 && boardEl && boardEl.shadowRoot) {
         docHighlights = Array.from(boardEl.shadowRoot.querySelectorAll('.highlight'));

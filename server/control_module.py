@@ -1,4 +1,4 @@
-import time
+utf-8import time
 import random
 import logging
 import pyautogui

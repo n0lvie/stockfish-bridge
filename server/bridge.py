@@ -1,4 +1,4 @@
-"""
+utf-8"""
 Stockfish Chess Bridge v2.0 – WebSocket Server & Orchestrator.
 
 Combines Chrome Extension bridging, CV visual automation, 
@@ -114,9 +114,9 @@ class ChessBridge:
             "mode": "extension",
             "autoplay": True,
             "allocator": "auto",
-            "threads": max(1, detect_cpu_count() // 2),
-            "hash": 256,
-            "quality": 1.0,
+            "threads": detect_cpu_count(),
+            "hash": 1024,
+            "quality": 1.5,
             "safety_buffer": 2000
         }
         if os.path.exists(SETTINGS_FILE):

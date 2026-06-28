@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+utf-8                       
 
 import struct
 import zlib

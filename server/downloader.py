@@ -1,4 +1,4 @@
-import os
+utf-8import os
 import sys
 import shutil
 import urllib.request

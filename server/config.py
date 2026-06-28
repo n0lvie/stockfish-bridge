@@ -1,4 +1,4 @@
-"""
+utf-8"""
 Configuration helpers for the Stockfish Chess Bridge server.
 
 Provides default configuration values, CPU detection, and

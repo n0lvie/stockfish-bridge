@@ -1,4 +1,4 @@
-import os
+utf-8import os
 import time
 import logging
 from PIL import Image, ImageOps

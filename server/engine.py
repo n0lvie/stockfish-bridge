@@ -1,4 +1,4 @@
-"""
+utf-8"""
 Async Stockfish UCI wrapper for the Chess Bridge server.
 
 Manages a Stockfish subprocess via the Universal Chess Interface (UCI)
@@ -60,7 +60,6 @@ class StockfishEngine:
         await self._send(f"setoption name {name} value {value}")
 
     async def configure_adaptive_params(self, our_time_ms, opp_time_ms, increment_ms, move_number, last_score_cp, last_score_type):
-                                                                                                    
         if not self._alive:
             return
 
@@ -69,53 +68,47 @@ class StockfishEngine:
             target_hash = self.manual_hash
             logger.info(f"[AdaptiveEngine] Manual Mode: Threads={target_threads}, Hash={target_hash}MB")
         else:
-                                                  
             import psutil
 
-            target_threads = 1
-            target_hash = 64
+            target_threads = max(1, self.cpu_cores // 2)
+            target_hash = 256
             
             is_critical = False
-            reason = "Quiet/winning position"
+            reason = "Normal position"
 
             if last_score_type == "mate":
-                if last_score_cp < 0:
-                    is_critical = True
-                    reason = "Facing forced mate"
+                is_critical = True
+                reason = "Forced mate sequence"
             elif last_score_type == "cp":
-                if last_score_cp < -100:
+                if last_score_cp < -50:
                     is_critical = True
                     reason = f"Losing position ({last_score_cp} cp)"
-                elif -150 <= last_score_cp <= 150:
+                elif -120 <= last_score_cp <= 120:
                     is_critical = True
                     reason = f"Tense position ({last_score_cp} cp)"
                     
-            if our_time_ms < 30000:                    
+            if our_time_ms < 60000:
                 is_critical = True
                 reason = f"Low time pressure ({our_time_ms/1000:.1f}s)"
                 
             if is_critical:
-                                                                                                    
-                max_threads = max(1, self.cpu_cores - 1) if self.cpu_cores > 2 else self.cpu_cores
-                max_threads = max(1, int(max_threads * self.quality_factor))
+                                                                  
+                max_threads = max(1, int(self.cpu_cores * self.quality_factor))
                 target_threads = min(max_threads, self.cpu_cores)
-
+                
                 free_ram_mb = int(psutil.virtual_memory().available / (1024 * 1024))
-                max_hash = min(2048, max(256, free_ram_mb // 4))
-                target_hash = max_hash
-                logger.info(f"[AdaptiveEngine] CRITICAL resource scaling engaged ({reason}): Threads={target_threads}, Hash={target_hash}MB")
+                target_hash = min(2048, max(512, free_ram_mb // 2))
+                logger.info(f"[AdaptiveEngine] CRITICAL peak scaling: Threads={target_threads}, Hash={target_hash}MB ({reason})")
             else:
-                                                                              
                 system_cpu = psutil.cpu_percent()
-                if system_cpu > 80:
-                    target_threads = 1
-                    target_hash = 64
-                    logger.info(f"[AdaptiveEngine] System under load ({system_cpu}%). Throttling down: Threads=1, Hash=64MB")
+                if system_cpu > 90:
+                    target_threads = max(1, self.cpu_cores // 2)
+                    target_hash = 256
+                    logger.info(f"[AdaptiveEngine] Extreme system load ({system_cpu}%). Threads={target_threads}, Hash={target_hash}MB")
                 else:
-                    target_threads = max(1, min(2, self.cpu_cores // 2))
-                    target_threads = max(1, int(target_threads * self.quality_factor))
-                    target_hash = 128
-                    logger.info(f"[AdaptiveEngine] Normal scaling: Threads={target_threads}, Hash={target_hash}MB")
+                    target_threads = max(1, int(self.cpu_cores * 0.75))
+                    target_hash = 512
+                    logger.info(f"[AdaptiveEngine] Standard scaling: Threads={target_threads}, Hash={target_hash}MB")
 
         try:
             if target_threads != self._current_threads:
