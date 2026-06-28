@@ -170,7 +170,7 @@
       if (r > 0) fen += '/';
     }
 
-    const ourTurn = isOurTurn();
+    const ourTurn = isOurTurn(board);
     const activeColor = ourTurn
       ? (ourColor === 'white' ? 'w' : 'b')
       : (ourColor === 'white' ? 'b' : 'w');
@@ -232,7 +232,7 @@
   }
 
   
-  function isOurTurn() {
+  function isOurTurn(board) {
     try {
       const bottomClock = document.querySelector('.clock-bottom .clock-component, .clock-component.clock-bottom');
       const topClock = document.querySelector('.clock-top .clock-component, .clock-component.clock-top');
@@ -264,9 +264,51 @@
         if (topActive) return false;
       }
 
-      const highlights = document.querySelectorAll('.highlight');
-      if (highlights.length > 0) {
-        const lastHighlight = highlights[highlights.length - 1];
+      // Highlight-based detection (works inside shadow DOM too)
+      if (boardEl) {
+        let highlights = Array.from(boardEl.querySelectorAll('.highlight'));
+        if (highlights.length === 0 && boardEl.shadowRoot) {
+          highlights = Array.from(boardEl.shadowRoot.querySelectorAll('.highlight'));
+        }
+
+        if (highlights.length > 0) {
+          let lastMoveColor = null;
+
+          for (const hl of highlights) {
+            const hClasses = hl.className || '';
+            const sqMatch = hClasses.match(/square-(\d)(\d)/);
+            if (sqMatch) {
+              const file = parseInt(sqMatch[1]) - 1;
+              const rank = parseInt(sqMatch[2]) - 1;
+
+              if (file >= 0 && file < 8 && rank >= 0 && rank < 8 && board) {
+                const piece = board[rank][file];
+                if (piece) {
+                  const isWhite = piece === piece.toUpperCase();
+                  lastMoveColor = isWhite ? 'white' : 'black';
+                  break;
+                }
+              }
+            }
+          }
+
+          if (lastMoveColor) {
+            const nextTurn = lastMoveColor === 'white' ? 'black' : 'white';
+            return ourColor === nextTurn;
+          }
+        } else {
+          // No highlights means game start - White's turn
+          return ourColor === 'white';
+        }
+      }
+
+      // Final fallback using querySelectorAll on the whole document for highlights
+      let docHighlights = Array.from(document.querySelectorAll('.highlight'));
+      if (docHighlights.length === 0 && boardEl && boardEl.shadowRoot) {
+        docHighlights = Array.from(boardEl.shadowRoot.querySelectorAll('.highlight'));
+      }
+      if (docHighlights.length > 0) {
+        const lastHighlight = docHighlights[docHighlights.length - 1];
         const hClasses = lastHighlight.className || '';
         const sqMatch = hClasses.match(/square-(\d)(\d)/);
         if (sqMatch) {
