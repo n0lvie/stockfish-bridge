@@ -223,15 +223,7 @@ class StockfishEngine:
             await self.stop()
 
         # Re-verify and apply optimal hardware configuration for new game
-        if self.is_auto_mode:
-            opt_threads, opt_hash = self._get_optimal_settings()
-            if opt_threads != self._current_threads:
-                await self.set_option("Threads", opt_threads)
-                self._current_threads = opt_threads
-            if opt_hash != self._current_hash:
-                await self.set_option("Hash", opt_hash)
-                self._current_hash = opt_hash
-            logger.info(f"[Auto-Tuning] Applying Hardware optimization: Threads={self._current_threads}, Hash={self._current_hash}MB")
+        # Removed dynamic mid-session resizing to prevent reallocation crashes and preserve transposition tables.
 
         await self._send("ucinewgame")
         self._ready_event.clear()
