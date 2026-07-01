@@ -8,14 +8,8 @@ def test_chess_com_move_simulation():
         
         print("Navigating to chess.com/analysis...")
         page.goto("https://www.chess.com/analysis", timeout=60000)
-        
-        print("Waiting for chess board to load...")
         page.wait_for_selector("wc-chess-board, chess-board", timeout=30000)
-        
-        # Give the board a few seconds to fully initialize
         page.wait_for_timeout(3000)
-        
-        print("Simulating pointer events to move pawn from e2 to e4...")
         
         moved = page.evaluate("""
             async () => {
@@ -44,9 +38,10 @@ def test_chess_com_move_simulation():
                 
                 function simulatePointerEvent(type, target, x, y) {
                     const event = new PointerEvent(type, {
-                        bubbles: true, cancelable: true,
+                        bubbles: true, cancelable: true, composed: true,
                         clientX: x, clientY: y,
-                        pointerId: 1, pointerType: 'mouse'
+                        pointerId: 1, pointerType: 'mouse', isPrimary: true,
+                        button: 0, buttons: type === 'pointerup' ? 0 : 1
                     });
                     target.dispatchEvent(event);
                 }
@@ -79,14 +74,15 @@ def test_chess_com_move_simulation():
         """)
         
         assert moved == True, "Failed to inject and execute move script."
-        
-        # Wait a moment for the animation and move validation
         page.wait_for_timeout(2000)
         
-        # Check if the piece actually moved to e4 by verifying the classes in the DOM
-        print("Verifying if DOM updated piece position to square-e4...")
-        e4_piece = page.evaluate("() => document.querySelector('.piece.square-e4') !== null")
-        assert e4_piece == True, "The move was not registered by the DOM. square-e4 is empty!"
+        e4_piece = page.evaluate("() => document.querySelector('.piece.square-54') !== null")
+        assert e4_piece == True, "The move was not registered by the DOM. square-54 is empty!"
+        
+        fen = page.evaluate("() => document.querySelector('wc-chess-board, chess-board').game.getFEN()")
+        print("FEN AFTER MOVE:", fen)
+        
+        assert fen.startswith('rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR'), f"Move failed. FEN is {fen}"
         
         print("Move successfully registered by Chess.com!")
         browser.close()

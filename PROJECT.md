@@ -8,10 +8,9 @@
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|-------------|--------|
-| 1 | System Stability Audit | `server/bridge.py`, `server/engine.py`, `extension/background.js`. Focus on race conditions, unhandled states, and WebSocket orchestration. | none | PLANNED |
-| 2 | Advanced Page Data Extraction | `extension/content/*.js`. Scrape game statuses, clocks, draws, color, orientation without brittle CSS classes. | none | PLANNED |
-| 3 | Flawless Move Execution | `extension/content/*.js`, `server/control_module.py`. 100% reliable pointer/mouse/touch event simulation, promotions, coordinate translation. | M1, M2 | PLANNED |
-| 4 | Final E2E Run | Pass 100% of E2E test suite + coverage hardening. | M3, E2E Track | PLANNED |
+| 1 | System Stability Audit | `server/bridge.py`, `server/engine.py`, `extension/background.js`. Focus on race conditions, unhandled states, and WebSocket orchestration. | none | IN_PROGRESS |
+| 2_3 | Extension & Move Execution Refactor | `extension/content/*.js`, `server/control_module.py`. Scrape all page data without brittle CSS classes AND ensure flawless move execution (refining `makeMove`). | none | PLANNED |
+| 4 | Final E2E Run | Pass 100% of E2E test suite + coverage hardening. | M1, M2_3, E2E Track | PLANNED |
 
 ## Interface Contracts
 ### Server ↔ Extension
@@ -21,4 +20,4 @@
 ## Code Layout
 - `server/` - Python backend
 - `extension/` - Chrome extension source
-- `tests/` - Testing framework and E2E scripts
+- `tests/` - Testing framework and E2E tests

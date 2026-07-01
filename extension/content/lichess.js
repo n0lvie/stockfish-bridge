@@ -109,41 +109,6 @@
     return { file, rank };
   }
 
-  function isOurTurnFallback(board) {
-    if (!boardEl || !board) return ourColor === 'white';
-
-    const highlights = boardEl.querySelectorAll('square.last-move');
-    if (highlights.length === 0) {
-      return ourColor === 'white';
-    }
-
-    const boardRect = boardEl.getBoundingClientRect();
-    const squareSize = boardRect.width / 8;
-    const isFlipped = cgWrap ? cgWrap.classList.contains('orientation-black') : false;
-
-    let lastMoveColor = null;
-
-    highlights.forEach(el => {
-      const { file, rank } = getSquareFromTransform(el, squareSize);
-      if (file >= 0 && file < 8 && rank >= 0 && rank < 8) {
-        const boardFile = isFlipped ? 7 - file : file;
-        const boardRank = isFlipped ? rank : 7 - rank;
-        const piece = board[boardRank][boardFile];
-        if (piece) {
-          const isWhite = piece === piece.toUpperCase();
-          lastMoveColor = isWhite ? 'white' : 'black';
-        }
-      }
-    });
-
-    if (lastMoveColor) {
-      const nextTurn = lastMoveColor === 'white' ? 'black' : 'white';
-      return ourColor === nextTurn;
-    }
-
-    return ourColor === 'white';
-  }
-
   let boardEl = null;
   let cgWrap = null;
   let observer = null;
@@ -172,11 +137,22 @@
             let fen = null;
             let turnColor = null;
             let playingAs = null;
+            let clocks = null;
+            let isGameOver = false;
+            let result = null;
             
             if (window.lichess && window.lichess.analysis) {
               fen = window.lichess.analysis.node.fen;
               turnColor = window.lichess.analysis.turnColor();
               playingAs = window.lichess.analysis.getOrientation();
+              
+              const g = window.lichess.analysis.data && window.lichess.analysis.data.game;
+              if (g && g.status && g.status.id >= 25) {
+                isGameOver = true;
+                if (g.winner === 'white') result = '1-0';
+                else if (g.winner === 'black') result = '0-1';
+                else result = '1/2-1/2';
+              }
             } else if (cgBoard && cgBoard.parentElement && cgBoard.parentElement.chessground) {
               const cg = cgBoard.parentElement.chessground;
               fen = cg.state.fen;
@@ -184,13 +160,21 @@
               playingAs = cg.state.orientation;
             }
             
+            if (window.lichess && window.lichess.clock) {
+              const c = window.lichess.clock;
+              clocks = { w: c.white !== undefined ? c.white : (c.data ? c.data.white : 0), b: c.black !== undefined ? c.black : (c.data ? c.data.black : 0) };
+            } else if (window.lichess && window.lichess.analysis && window.lichess.analysis.clock) {
+              const c = window.lichess.analysis.clock;
+              clocks = { w: c.white !== undefined ? c.white : 0, b: c.black !== undefined ? c.black : 0 };
+            }
+            
             if (fen) {
-              const state = JSON.stringify({ fen, turnColor, playingAs });
+              const state = JSON.stringify({ fen, turnColor, playingAs, clocks, isGameOver, result });
               if (state !== lastState) {
                 lastState = state;
                 window.postMessage({
                   type: 'stockfish-bridge-lichess-state',
-                  payload: { fen, turnColor, playingAs }
+                  payload: { fen, turnColor, playingAs, clocks, isGameOver, result }
                 }, '*');
               }
             }
@@ -205,6 +189,12 @@
     window.addEventListener('message', (event) => {
       if (event.source === window && event.data && event.data.type === 'stockfish-bridge-lichess-state') {
         injectedState = event.data.payload;
+        if (injectedState.isGameOver && gameActive) {
+          gameActive = false;
+          let res = injectedState.result || 'unknown';
+          Bridge.sendGameOver(res);
+          console.log('[StockfishBridge] Game over detected via state:', res);
+        }
       }
     });
   }
@@ -466,54 +456,39 @@
     let ourTimeMs = 0;
     let oppTimeMs = 0;
 
-    try {
+    if (injectedState && injectedState.clocks) {
+      const clocks = injectedState.clocks;
+      let wTime = clocks.w;
+      let bTime = clocks.b;
       
-      const bottomClock = document.querySelector(
-        '[role="timer"].rclock-bottom, [data-cy*="clock-bottom"], [data-test*="clock-bottom"], .rclock-bottom .time, .clock-bottom .time, ' +
-        '.rclock.rclock-bottom .time'
-      );
-      const topClock = document.querySelector(
-        '[role="timer"].rclock-top, [data-cy*="clock-top"], [data-test*="clock-top"], .rclock-top .time, .clock-top .time, ' +
-        '.rclock.rclock-top .time'
-      );
+      if (typeof wTime === 'number' && typeof bTime === 'number') {
+        // Assume seconds if < 100000 and not ms directly, though Lichess usually exposes seconds in window.lichess.clock
+        if (wTime > 0 && wTime < 100000 && !Number.isInteger(wTime)) {
+          wTime *= 1000;
+          bTime *= 1000;
+        } else if (wTime > 0 && wTime < 100000) {
+          wTime *= 1000;
+          bTime *= 1000;
+        }
 
-      if (bottomClock) {
-        ourTimeMs = parseTimeString(bottomClock.textContent);
+        if (ourColor === 'white') {
+          ourTimeMs = Math.round(wTime);
+          oppTimeMs = Math.round(bTime);
+        } else {
+          ourTimeMs = Math.round(bTime);
+          oppTimeMs = Math.round(wTime);
+        }
       }
-      if (topClock) {
-        oppTimeMs = parseTimeString(topClock.textContent);
-      }
-    } catch (e) {
-      
     }
 
     return { ourTimeMs, oppTimeMs };
   }
 
-  
   function isOurTurn(board) {
-    try {
-      
-      const bottomClock = document.querySelector(
-        '.rclock-bottom, .rclock.rclock-bottom'
-      );
-      if (bottomClock) {
-        return bottomClock.classList.contains('running');
-      }
-
-      
-      const turnIndicator = document.querySelector('.rclock.running');
-      if (turnIndicator) {
-        const rect = turnIndicator.getBoundingClientRect();
-        
-        return rect.top > window.innerHeight / 2;
-      }
-
-      return isOurTurnFallback(board);
-    } catch (e) {
-      console.warn('[StockfishBridge] Error in isOurTurn:', e);
-      return isOurTurnFallback(board);
+    if (injectedState && injectedState.turnColor) {
+      return ourColor === injectedState.turnColor;
     }
+    return false;
   }
 
   
@@ -735,28 +710,6 @@
   function detectGameState() {
     const gameObserver = new MutationObserver(() => {
       try {
-        
-        const resultEl = document.querySelector(
-          '.result-wrap, .result_wrap, .status, ' +
-          '[class*="game-status"][class*="over"], .game-over'
-        );
-
-        if (resultEl && gameActive) {
-          const text = resultEl.textContent || '';
-
-          
-          if (/\b(1-0|0-1|½-½|1\/2|draw|stalemate|checkmate|resign|timeout|abort)\b/i.test(text)) {
-            gameActive = false;
-            let result = 'unknown';
-            if (/1-0|white\s*is\s*victorious/i.test(text)) result = '1-0';
-            else if (/0-1|black\s*is\s*victorious/i.test(text)) result = '0-1';
-            else if (/½-½|1\/2|draw|stalemate/i.test(text)) result = '1/2-1/2';
-            Bridge.sendGameOver(result);
-            console.log('[StockfishBridge] Game over detected:', result);
-          }
-        }
-
-        
         const newBoard = document.querySelector('cg-board');
         if (newBoard && newBoard !== boardEl) {
           console.log('[StockfishBridge] New lichess board detected, re-initializing');
