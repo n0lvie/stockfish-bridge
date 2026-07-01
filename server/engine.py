@@ -42,6 +42,9 @@ class StockfishEngine:
         self._last_bestmove = None                       
         self._alive = False              
 
+        self._search_generation = 0
+        self._completed_searches = 0
+
         self.current_depth = 0             
         self.current_seldepth = 0             
         self.current_score = 0             
@@ -146,7 +149,7 @@ class StockfishEngine:
 
     async def quit(self):
 
-        if not self._alive:
+        if not self._alive and self._process is None:
             return
         self._alive = False
         try:
@@ -162,10 +165,6 @@ class StockfishEngine:
                 pass
 
         if self._process is not None:
-            try:
-                self._process.kill()
-            except ProcessLookupError:
-                pass
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5)
             except asyncio.TimeoutError:
@@ -191,6 +190,7 @@ class StockfishEngine:
         self._last_bestmove = None
         self._is_thinking = True
         self.best_move_so_far = None
+        self._search_generation += 1
         await self._send("go infinite")
 
     async def go_movetime(self, ms):
@@ -199,6 +199,7 @@ class StockfishEngine:
         self._last_bestmove = None
         self._is_thinking = True
         self.best_move_so_far = None
+        self._search_generation += 1
         await self._send("go movetime %d" % ms)
 
     async def stop(self):
@@ -268,7 +269,7 @@ class StockfishEngine:
                                              
                     self._bestmove_event.set()
                     self._ready_event.set()
-                    self._uciok_event.set()
+                    # Do not set _uciok_event to avoid masking crashes during start
                     break
 
                 line = raw.decode(errors="replace").strip()
@@ -296,6 +297,11 @@ class StockfishEngine:
             self._ready_event.set()
 
     def _handle_bestmove(self, line):
+
+        self._completed_searches += 1
+        if self._completed_searches < self._search_generation:
+            logger.debug("Ignoring bestmove from cancelled search: %s", line)
+            return
 
         parts = line.split()
         move = parts[1] if len(parts) >= 2 else None

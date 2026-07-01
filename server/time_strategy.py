@@ -99,14 +99,20 @@ class TimeStrategy:
 
         # 6. Speed 3 (Grind)
         target_time = grind_time
-        target_time = min(target_time, usable * 0.20)
-        target_time += increment_ms * 0.8
         
-        # Scale down if behind opponent on time
-        if our_time_ms < opp_time_ms and opp_time_ms > 0:
+        max_fraction = 0.20
+        # Scale time based on clock advantage/disadvantage
+        if opp_time_ms > 0:
             scale_factor = our_time_ms / opp_time_ms
-            scale_factor = max(0.3, min(1.0, scale_factor))
+            if scale_factor < 1.0:
+                scale_factor = max(0.3, scale_factor)
+            else:
+                scale_factor = min(3.0, scale_factor)
+                max_fraction = min(0.40, 0.20 * scale_factor)
             target_time *= scale_factor
+
+        target_time = min(target_time, usable * max_fraction)
+        target_time += increment_ms * 0.8
             
         # Floor of 500ms for Grind to prevent severe blunders
         target_time = max(target_time, min(500.0, usable))

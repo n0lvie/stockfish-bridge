@@ -1,0 +1,9 @@
+{
+    "mode": "extension",
+    "autoplay": true,
+    "allocator": "manual",
+    "threads": 7,
+    "hash": 1024,
+    "quality": 1.5,
+    "safety_buffer": 2000
+}

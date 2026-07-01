@@ -159,10 +159,61 @@
 
   
 
+  let injectedState = null;
+
+  function injectMainWorldScript() {
+    const script = document.createElement('script');
+    script.textContent = `
+      (function() {
+        let lastState = '';
+        function poll() {
+          try {
+            const cgBoard = document.querySelector('cg-board');
+            let fen = null;
+            let turnColor = null;
+            let playingAs = null;
+            
+            if (window.lichess && window.lichess.analysis) {
+              fen = window.lichess.analysis.node.fen;
+              turnColor = window.lichess.analysis.turnColor();
+              playingAs = window.lichess.analysis.getOrientation();
+            } else if (cgBoard && cgBoard.parentElement && cgBoard.parentElement.chessground) {
+              const cg = cgBoard.parentElement.chessground;
+              fen = cg.state.fen;
+              turnColor = cg.state.turnColor;
+              playingAs = cg.state.orientation;
+            }
+            
+            if (fen) {
+              const state = JSON.stringify({ fen, turnColor, playingAs });
+              if (state !== lastState) {
+                lastState = state;
+                window.postMessage({
+                  type: 'stockfish-bridge-lichess-state',
+                  payload: { fen, turnColor, playingAs }
+                }, '*');
+              }
+            }
+          } catch(e) {}
+        }
+        setInterval(poll, 100);
+      })();
+    `;
+    (document.head || document.documentElement).appendChild(script);
+    script.remove();
+
+    window.addEventListener('message', (event) => {
+      if (event.source === window && event.data && event.data.type === 'stockfish-bridge-lichess-state') {
+        injectedState = event.data.payload;
+      }
+    });
+  }
+
   function init() {
     Bridge.init(SITE);
     Bridge.setMakeMoveCallback(makeMove);
     console.log('[StockfishBridge] lichess.org adapter initializing');
+    injectMainWorldScript();
     waitForBoard();
   }
 
@@ -227,11 +278,15 @@
 
   
   function detectColor() {
+    if (injectedState && injectedState.playingAs) {
+      ourColor = injectedState.playingAs;
+      return;
+    }
     if (!cgWrap) {
       cgWrap = document.querySelector('.cg-wrap');
     }
     if (cgWrap) {
-      const isFlipped = cgWrap.classList.contains('orientation-black');
+      const isFlipped = cgWrap.classList.contains('orientation-black') || cgWrap.getAttribute('orientation') === 'black';
       ourColor = isFlipped ? 'black' : 'white';
     } else {
       
@@ -247,6 +302,12 @@
 
   
   function readBoardFEN() {
+    if (injectedState && injectedState.fen) {
+      const fen = injectedState.fen;
+      const ourTurn = injectedState.turnColor === ourColor;
+      return { fen, ourTurn };
+    }
+
     if (!boardEl) return null;
 
     const pieces = boardEl.querySelectorAll('piece');
@@ -408,11 +469,11 @@
     try {
       
       const bottomClock = document.querySelector(
-        '.rclock-bottom .time, .clock-bottom .time, ' +
+        '[role="timer"].rclock-bottom, [data-cy*="clock-bottom"], [data-test*="clock-bottom"], .rclock-bottom .time, .clock-bottom .time, ' +
         '.rclock.rclock-bottom .time'
       );
       const topClock = document.querySelector(
-        '.rclock-top .time, .clock-top .time, ' +
+        '[role="timer"].rclock-top, [data-cy*="clock-top"], [data-test*="clock-top"], .rclock-top .time, .clock-top .time, ' +
         '.rclock.rclock-top .time'
       );
 

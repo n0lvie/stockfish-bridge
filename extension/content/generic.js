@@ -30,6 +30,7 @@
   function findBoardElement() {
     
     const selectors = [
+      '[role="application"][aria-label*="chess" i]', '[role="board"]', '[data-cy*="board"]', '[data-test*="board"]',
       'cg-board', 'chess-board', 'wc-chess-board', '.chessboard', '#chessboard',
       '.chess-board', '.board-container', '[class*="chess-board"]', '[class*="chessboard"]'
     ];
@@ -110,8 +111,10 @@
   }
 
   function detectColor() {
-    
-    
+    if (boardEl && boardEl.hasAttribute('orientation')) {
+      ourColor = boardEl.getAttribute('orientation');
+      return;
+    }
     
     const pieces = findPieceElements();
     if (pieces.length === 0) {
@@ -148,6 +151,7 @@
 
   function findPieceElements() {
     const pieceSelectors = [
+      '[role="img"][aria-label*="piece" i]', '[data-piece]', '[data-cy*="piece"]', '[data-test*="piece"]',
       'piece', '[class*="piece"]', '[class*="pawn"]', 'img[src*="piece"]', 'svg[class*="piece"]',
       'div[class*="wp"]', 'div[class*="bp"]', 'div[class*="wn"]', 'div[class*="bn"]',
       'div[class*="wb"]', 'div[class*="bb"]', 'div[class*="wr"]', 'div[class*="br"]',
@@ -282,7 +286,10 @@
   function readClocks() {
     
     let times = [];
-    const elements = document.querySelectorAll('div, span, p, .clock, .timer');
+    const elements = document.querySelectorAll(
+      '[role="timer"], [aria-label*="clock" i], [aria-label*="time" i], [data-cy*="clock"], [data-test*="clock"], ' +
+      'div, span, p, .clock, .timer'
+    );
     
     elements.forEach(el => {
       if (el.children.length === 0) {

@@ -282,54 +282,72 @@ class ChessBridge:
         is_our_turn = bool(msg.get("isOurTurn", False))
         move_number = int(msg.get("moveNumber", 0))
         increment = int(msg.get("increment", 0))
+
+        parts = fen.split()
+        active_color = parts[1] if len(parts) > 1 else "w"
+            
+        if not is_our_turn:
+            await self._stop_monitoring()
+            try:
+                engine = await self._ensure_engine()
+                if engine.is_thinking:
+                    await engine.stop()
+            except Exception as e:
+                logger.error(f"Engine stop error: {e}")
+                return False
+            if ws:
+                await self._send(ws, {"type": "status", "state": "stopped"})
+            self._current_fen = fen
+            self._our_time_ms = our_time
+            self._opp_time_ms = opp_time
+            self._is_our_turn = is_our_turn
+            self._move_number = move_number
+            self._increment_ms = increment
+            self._active_color = active_color
+            return True
+
+        await self._stop_monitoring()
         
+        try:
+            engine = await self._ensure_engine()
+            if engine.is_thinking:
+                await engine.stop()
+
+            def on_info(info):
+                asyncio.ensure_future(self._handle_engine_info(ws, info))
+                
+            engine.on_info = on_info
+
+            await engine.configure_adaptive_params(
+                our_time_ms=our_time,
+                opp_time_ms=opp_time,
+                increment_ms=increment,
+                move_number=move_number,
+                last_score_cp=self._last_score_cp,
+                last_score_type=self._last_score_type
+            )
+            
+            await engine.set_position(fen)
+            await engine.go_infinite()
+        except Exception as e:
+            logger.error(f"Engine error in _handle_state: {e}")
+            return False
+
         self._current_fen = fen
         self._our_time_ms = our_time
         self._opp_time_ms = opp_time
         self._is_our_turn = is_our_turn
         self._move_number = move_number
         self._increment_ms = increment
+        self._active_color = active_color
 
-        parts = fen.split()
-        if len(parts) > 1:
-            self._active_color = parts[1]
-            
-        if not is_our_turn:
-            await self._stop_monitoring()
-            engine = await self._ensure_engine()
-            if engine.is_thinking:
-                await engine.stop()
-            if ws:
-                await self._send(ws, {"type": "status", "state": "stopped"})
-            return
-
-        await self._stop_monitoring()
-        
-        engine = await self._ensure_engine()
-        if engine.is_thinking:
-            await engine.stop()
-
-        def on_info(info):
-            asyncio.ensure_future(self._handle_engine_info(ws, info))
-            
-        engine.on_info = on_info
-
-        await engine.configure_adaptive_params(
-            our_time_ms=self._our_time_ms,
-            opp_time_ms=self._opp_time_ms,
-            increment_ms=self._increment_ms,
-            move_number=self._move_number,
-            last_score_cp=self._last_score_cp,
-            last_score_type=self._last_score_type
-        )
-        
-        await engine.set_position(fen)
-        await engine.go_infinite()
-        
         if ws:
             await self._send(ws, {"type": "status", "state": "thinking"})
             
         self._monitor_task = asyncio.ensure_future(self._monitor_loop(ws, engine))
+        return True
+
+
 
     async def _handle_clock(self, msg):
         self._our_time_ms = int(msg.get("ourTimeMs", self._our_time_ms))
@@ -445,19 +463,47 @@ class ChessBridge:
                                 self._is_our_turn = False
                                 
                     return
+
+            if self._game_active and not engine.is_thinking:
+                best_move = engine._last_bestmove or engine.best_move_so_far
+                if best_move:
+                    if self._mode == "extension":
+                        if ws:
+                            move_msg = {
+                                "type": "move",
+                                "uci": best_move,
+                                "from": best_move[:2],
+                                "to": best_move[2:4],
+                                "promotion": best_move[4] if len(best_move) > 4 else None
+                            }
+                            await self._send(ws, move_msg)
+                            await self._send(ws, {"type": "status", "state": "stopped"})
+                    elif self._mode == "cv":
+                        if self._autoplay:
+                            success = await asyncio.get_running_loop().run_in_executor(
+                                None,
+                                control_module.execute_move,
+                                best_move,
+                                self._cv_classifier.board_rect,
+                                self._cv_classifier.is_flipped,
+                                True                
+                            )
+                            if success:
+                                self._is_our_turn = False
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.exception(f"Error in monitor loop: {e}")
 
     async def _stop_monitoring(self):
-        if self._monitor_task is not None and not self._monitor_task.done():
-            self._monitor_task.cancel()
+        task = self._monitor_task
+        self._monitor_task = None
+        if task is not None and not task.done():
+            task.cancel()
             try:
-                await self._monitor_task
+                await task
             except Exception:
                 pass
-        self._monitor_task = None
 
     async def _handle_settings_update(self, msg):
                               
@@ -637,24 +683,25 @@ class ChessBridge:
                     None, BoardDetector.capture_screenshot
                 )
 
-                fen = self._cv_classifier.get_board_fen(img, self._active_color)
+                fen = await asyncio.get_running_loop().run_in_executor(
+                    None, self._cv_classifier.get_board_fen, img, self._active_color
+                )
                 if not fen:
                     continue
 
                 if fen.split()[0] != self._current_fen.split()[0]:
 
                     logger.info(f"Board change detected via CV: {fen}")
-                    self._current_fen = fen
 
                     is_our_turn = not self._is_our_turn
 
-                    self._active_color = "b" if self._active_color == "w" else "w"
+                    active_color = "b" if self._active_color == "w" else "w"
                     parts = fen.split()
-                    parts[1] = self._active_color
-                    self._current_fen = " ".join(parts)
+                    parts[1] = active_color
+                    new_fen = " ".join(parts)
 
-                    await self._handle_state(None, {
-                        "fen": self._current_fen,
+                    success = await self._handle_state(None, {
+                        "fen": new_fen,
                         "ourTimeMs": self._our_time_ms,
                         "oppTimeMs": self._opp_time_ms,
                         "isOurTurn": is_our_turn,
@@ -662,7 +709,8 @@ class ChessBridge:
                         "increment": self._increment_ms
                     })
 
-                    await self._send_cv_state_to_dashboard()
+                    if success is not False:
+                        await self._send_cv_state_to_dashboard()
                     
             except Exception as e:
                 logger.error(f"Error in CV loop: {e}")

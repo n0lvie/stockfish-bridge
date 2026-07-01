@@ -90,10 +90,50 @@
 
   
 
+  let injectedState = null;
+
+  function injectMainWorldScript() {
+    const script = document.createElement('script');
+    script.textContent = `
+      (function() {
+        let lastState = '';
+        function poll() {
+          try {
+            const board = document.querySelector('wc-chess-board');
+            if (board && board.game) {
+              const fen = board.game.getFEN ? board.game.getFEN() : (board.game.fen || null);
+              const turn = board.game.getTurn ? board.game.getTurn() : null;
+              const playingAs = board.game.getPlayingAs ? board.game.getPlayingAs() : null;
+              
+              const state = JSON.stringify({ fen, turn, playingAs });
+              if (state !== lastState) {
+                lastState = state;
+                window.postMessage({
+                  type: 'stockfish-bridge-chesscom-state',
+                  payload: { fen, turn, playingAs }
+                }, '*');
+              }
+            }
+          } catch(e) {}
+        }
+        setInterval(poll, 100);
+      })();
+    `;
+    (document.head || document.documentElement).appendChild(script);
+    script.remove();
+
+    window.addEventListener('message', (event) => {
+      if (event.source === window && event.data && event.data.type === 'stockfish-bridge-chesscom-state') {
+        injectedState = event.data.payload;
+      }
+    });
+  }
+
   function init() {
     Bridge.init(SITE);
     Bridge.setMakeMoveCallback(makeMove);
     console.log('[StockfishBridge] chess.com adapter initializing');
+    injectMainWorldScript();
     waitForBoard();
   }
 
@@ -172,13 +212,25 @@
   
   function detectColor() {
     if (!boardEl) return;
-    const isFlipped = boardEl.classList.contains('flipped') ||
-      (boardEl.hasAttribute('flipped') && boardEl.getAttribute('flipped') !== 'false');
-    ourColor = isFlipped ? 'black' : 'white';
+    const orientation = boardEl.getAttribute('orientation');
+    if (orientation) {
+      ourColor = orientation;
+    } else {
+      const isFlipped = boardEl.classList.contains('flipped') ||
+        (boardEl.hasAttribute('flipped') && boardEl.getAttribute('flipped') !== 'false');
+      ourColor = isFlipped ? 'black' : 'white';
+    }
   }
 
   
   function readBoardFEN() {
+    if (injectedState && injectedState.fen) {
+      const fen = injectedState.fen;
+      const fenParts = fen.split(' ');
+      const ourTurn = fenParts[1] === (ourColor === 'white' ? 'w' : 'b');
+      return { fen, ourTurn };
+    }
+
     if (!boardEl) return null;
 
     
@@ -296,7 +348,7 @@
     try {
       
       const clockContainers = Array.from(document.querySelectorAll(
-        '.clock-component, [class*="clock-container"], .clock-bottom, .clock-top, ' +
+        '[role="timer"], [aria-label*="clock"], [data-cy*="clock"], [data-test*="clock"], .clock-component, [class*="clock-container"], .clock-bottom, .clock-top, ' +
         '[class*="timer-component"], [class*="player-timer"], [class*="bot-timer"]'
       ));
 
@@ -352,12 +404,12 @@
   
   function isOurTurn(board) {
     try {
-      const bottomClock = document.querySelector('.clock-bottom .clock-component, .clock-component.clock-bottom');
-      const topClock = document.querySelector('.clock-top .clock-component, .clock-component.clock-top');
+      const bottomClock = document.querySelector('[data-cy="clock-bottom"], .clock-bottom .clock-component, .clock-component.clock-bottom');
+      const topClock = document.querySelector('[data-cy="clock-top"], .clock-top .clock-component, .clock-component.clock-top');
 
       if (bottomClock && topClock) {
-        if (bottomClock.classList.contains('clock-player-turn')) return true;
-        if (topClock.classList.contains('clock-player-turn')) return false;
+        if (bottomClock.classList.contains('clock-player-turn') || bottomClock.hasAttribute('data-active')) return true;
+        if (topClock.classList.contains('clock-player-turn') || topClock.hasAttribute('data-active')) return false;
 
         if (!bottomClock.classList.contains('clock-inactive') &&
              topClock.classList.contains('clock-inactive')) return true;

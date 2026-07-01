@@ -12,9 +12,10 @@ let activeTabId = null;
 let currentServerUrl = 'ws://localhost:9999';
 let autoPlay = true;
 let pingInterval = null;
+let lastPongTime = 0;
 let lastEngineInfo = {};
 let currentGameInfo = {};
-
+let messageQueue = [];
 
 chrome.storage.local.get(['serverUrl', 'autoPlay'], (result) => {
   if (result.serverUrl) {
@@ -54,9 +55,15 @@ function connectWebSocket(serverUrl) {
     notifyContentScript({ source: 'background', data: { type: 'connected', connected: true } });
 
     
+    lastPongTime = Date.now();
     clearInterval(pingInterval);
     pingInterval = setInterval(() => {
       if (ws && ws.readyState === WebSocket.OPEN) {
+        if (Date.now() - lastPongTime > 10000) {
+          console.error('[StockfishBridge] Ping timeout, closing connection');
+          ws.close();
+          return;
+        }
         try {
           ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
         } catch (e) {
@@ -64,6 +71,15 @@ function connectWebSocket(serverUrl) {
         }
       }
     }, 5000);
+
+    while (messageQueue.length > 0) {
+      const msg = messageQueue.shift();
+      try {
+        ws.send(JSON.stringify(msg));
+      } catch(e) {
+        console.error('[StockfishBridge] Error flushing queue:', e);
+      }
+    }
   };
 
   ws.onmessage = (event) => {
@@ -71,7 +87,10 @@ function connectWebSocket(serverUrl) {
       const data = JSON.parse(event.data);
 
       
-      if (data.type === 'pong') return;
+      if (data.type === 'pong') {
+        lastPongTime = Date.now();
+        return;
+      }
 
       
       if (data.type === 'info') {
@@ -147,10 +166,15 @@ function disconnectWebSocket() {
 }
 
 
-function notifyContentScript(message) {
+function notifyContentScript(message, retries = 3) {
   if (activeTabId) {
-    chrome.tabs.sendMessage(activeTabId, message).catch(() => {
-      
+    chrome.tabs.sendMessage(activeTabId, message).catch((e) => {
+      if (retries > 0 && message.data && message.data.type === 'move') {
+        console.log('[StockfishBridge] Retrying move delivery to tab');
+        setTimeout(() => notifyContentScript(message, retries - 1), 500);
+      } else {
+        console.error('[StockfishBridge] Failed to send to tab:', e);
+      }
     });
   }
 }
@@ -164,6 +188,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         activeTabId = sender.tab?.id || null;
         console.log('[StockfishBridge] Content script registered from tab:', activeTabId, 'site:', message.site);
         sendResponse({ connected: wsConnected, autoPlay });
+        return true;
+      }
+
+      if (sender.tab && sender.tab.id !== activeTabId && activeTabId !== null) {
+        sendResponse({ error: 'Not the active tab' });
         return true;
       }
 
@@ -200,7 +229,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ sent: false, error: e.message });
           }
         } else {
-          sendResponse({ sent: false, error: 'WebSocket not connected' });
+          messageQueue.push(message.data);
+          sendResponse({ sent: false, queued: true });
         }
         return true;
       }
