@@ -113,6 +113,8 @@ class TimeStrategy:
         return int(target_time), 99, "Speed 3 (Grind)"
 
     def should_move_now(self, our_time_ms, opp_time_ms, increment_ms=0, move_number=0, last_score_cp=0, last_score_type="cp"):
+        if self.is_untimed(our_time_ms, opp_time_ms):
+            return False
         effective_remaining = our_time_ms - self.safety_buffer_ms
         if effective_remaining <= 0:
             logger.debug("should_move_now: YES – below safety buffer")
