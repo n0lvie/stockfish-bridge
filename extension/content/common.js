@@ -145,13 +145,19 @@ const Bridge = {
   sendState(fen, ourTimeMs, oppTimeMs, isOurTurn, lastMove, moveNumber, increment) {
     const now = Date.now();
 
-    
+    // Auto-detect new game from starting FEN
+    if (fen && fen.startsWith('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR')) {
+      this._moveNumber = 0;
+    }
+
     if (fen === this._lastFen && !isOurTurn && (now - this._lastStateSendTime) < 2000) {
       return;
     }
 
     this._lastFen = fen;
     this._lastStateSendTime = now;
+
+    let finalMoveNumber = (moveNumber !== undefined && moveNumber !== null) ? moveNumber : this._moveNumber;
 
     this.sendToServer({
       type: 'state',
@@ -160,7 +166,7 @@ const Bridge = {
       oppTimeMs,
       isOurTurn,
       lastMove: lastMove || null,
-      moveNumber: moveNumber || this._moveNumber,
+      moveNumber: finalMoveNumber,
       increment: increment || 0,
       site: this._site,
       gameId: this._gameId,

@@ -295,12 +295,13 @@
 
     try {
       
-      const clockContainers = document.querySelectorAll(
-        '.clock-component, [class*="clock-container"], .clock-bottom, .clock-top'
-      );
+      const clockContainers = Array.from(document.querySelectorAll(
+        '.clock-component, [class*="clock-container"], .clock-bottom, .clock-top, ' +
+        '[class*="timer-component"], [class*="player-timer"], [class*="bot-timer"]'
+      ));
 
       if (clockContainers.length >= 2) {
-        const sorted = Array.from(clockContainers).sort((a, b) => {
+        const sorted = clockContainers.sort((a, b) => {
           return b.getBoundingClientRect().top - a.getBoundingClientRect().top;
         });
 
@@ -311,19 +312,30 @@
         oppTimeMs = parseTimeString(topClockText);
       } else {
         
-        const clocks = document.querySelectorAll(
-          '.clock-time-monospace, [class*="clock-time"]'
-        );
-        if (clocks.length >= 2) {
-          const sorted = Array.from(clocks).sort((a, b) => {
+        const allElements = document.querySelectorAll('span, div');
+        const timeEls = [];
+        const timeRegex = /^(\d+:)?\d+:\d+(\.\d+)?$/;
+        
+        for (let i = 0; i < allElements.length; i++) {
+          const el = allElements[i];
+          if (el.children.length === 0) {
+            const text = el.textContent.trim();
+            if (timeRegex.test(text)) {
+              timeEls.push(el);
+            }
+          }
+        }
+        
+        if (timeEls.length >= 2) {
+          const sorted = timeEls.sort((a, b) => {
             return b.getBoundingClientRect().top - a.getBoundingClientRect().top;
           });
           ourTimeMs = parseTimeString(sorted[0].textContent);
-          oppTimeMs = parseTimeString(sorted[1].textContent);
+          oppTimeMs = parseTimeString(sorted[sorted.length - 1].textContent);
         }
       }
     } catch (e) {
-      
+      console.warn('[StockfishBridge] Error reading clocks:', e);
     }
 
     return { ourTimeMs, oppTimeMs };
@@ -513,7 +525,7 @@
         clocks.oppTimeMs,
         ourTurn,
         null,
-        0,
+        null,
         0
       );
     } catch (e) {
