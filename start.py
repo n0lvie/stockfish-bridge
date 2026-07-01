@@ -1,10 +1,19 @@
-utf-8                       
-
 import os
 import sys
 import socket
 import subprocess
 import shutil
+
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+if hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 
 def log(message):
     print(f"\033[94m[*] {message}\033[0m")

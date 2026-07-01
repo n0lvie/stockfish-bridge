@@ -4,6 +4,146 @@
   'use strict';
 
   const SITE = 'lichess.org';
+
+  let castlingRights = { K: true, Q: true, k: true, q: true };
+  let enPassantSquare = '-';
+  let prevBoard = null;
+
+  function resetGameState() {
+    castlingRights = { K: true, Q: true, k: true, q: true };
+    enPassantSquare = '-';
+    prevBoard = null;
+    console.log('[StockfishBridge] Game state reset (castling & en passant)');
+  }
+
+  function initNewGame(gameId, color, timeControl, increment) {
+    resetGameState();
+    Bridge.sendInit(gameId, color, timeControl, increment);
+  }
+
+  function getElementClassString(el) {
+    if (!el) return '';
+    if (typeof el.className === 'string') return el.className;
+    if (el.className && typeof el.className.baseVal === 'string') return el.className.baseVal;
+    return el.getAttribute('class') || '';
+  }
+
+  function identifyPieceType(el) {
+    const rawClass = getElementClassString(el);
+    const classes = rawClass.toLowerCase();
+    const src = (el.src || el.getAttribute('src') || '').toLowerCase();
+
+    let color = null;
+    let type = null;
+
+    if (classes.includes('white') || classes.includes('wp') || classes.includes('wn') || 
+        classes.includes('wb') || classes.includes('wr') || classes.includes('wq') || 
+        classes.includes('wk') || src.includes('/w') || src.includes('white')) {
+      color = 'w';
+    } else if (classes.includes('black') || classes.includes('bp') || classes.includes('bn') || 
+               classes.includes('bb') || classes.includes('br') || classes.includes('bq') || 
+               classes.includes('bk') || src.includes('/b') || src.includes('black')) {
+      color = 'b';
+    }
+
+    const mappings = {
+      pawn: 'p', rook: 'r', knight: 'n', bishop: 'b', queen: 'q', king: 'k',
+      wp: 'p', wn: 'n', wb: 'b', wr: 'r', wq: 'q', wk: 'k',
+      bp: 'p', bn: 'n', bb: 'b', br: 'r', bq: 'q', bk: 'k'
+    };
+
+    for (const [key, val] of Object.entries(mappings)) {
+      if (classes.includes(key) || src.includes(key)) {
+        type = val;
+        break;
+      }
+    }
+
+    if (!type) {
+      const match = classes.match(/([wb])([pnbrqk])/);
+      if (match) {
+        color = match[1];
+        type = match[2];
+      }
+    }
+
+    if (color && type) {
+      return color === 'w' ? type.toUpperCase() : type.toLowerCase();
+    }
+    return null;
+  }
+
+  function getSquareFromTransform(el, squareSize) {
+    const transform = el.style.transform || '';
+    const computedTransform = window.getComputedStyle(el).transform || '';
+    let file = -1, rank = -1;
+
+    let m3d = transform.match(/translate3d\(\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\)/i) ||
+              computedTransform.match(/translate3d\(\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\)/i);
+    if (m3d) {
+      const valX = parseFloat(m3d[1]);
+      const unitX = m3d[2];
+      const valY = parseFloat(m3d[3]);
+      const unitY = m3d[4];
+      file = (unitX === '%' || (!unitX && Math.abs(valX) <= 100)) ? Math.round(valX / 12.5) : (squareSize > 0 ? Math.round(valX / squareSize) : -1);
+      rank = (unitY === '%' || (!unitY && Math.abs(valY) <= 100)) ? Math.round(valY / 12.5) : (squareSize > 0 ? Math.round(valY / squareSize) : -1);
+    } else {
+      let m2d = transform.match(/translate\(\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\)/i) ||
+                computedTransform.match(/translate\(\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\)/i);
+      if (m2d) {
+        const valX = parseFloat(m2d[1]);
+        const unitX = m2d[2];
+        const valY = parseFloat(m2d[3]);
+        const unitY = m2d[4];
+        file = (unitX === '%' || (!unitX && Math.abs(valX) <= 100)) ? Math.round(valX / 12.5) : (squareSize > 0 ? Math.round(valX / squareSize) : -1);
+        rank = (unitY === '%' || (!unitY && Math.abs(valY) <= 100)) ? Math.round(valY / 12.5) : (squareSize > 0 ? Math.round(valY / squareSize) : -1);
+      } else {
+        let mMat = transform.match(/matrix\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\)/i) ||
+                  computedTransform.match(/matrix\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\)/i);
+        if (mMat && squareSize > 0) {
+          file = Math.round(parseFloat(mMat[5]) / squareSize);
+          rank = Math.round(parseFloat(mMat[6]) / squareSize);
+        }
+      }
+    }
+    return { file, rank };
+  }
+
+  function isOurTurnFallback(board) {
+    if (!boardEl || !board) return ourColor === 'white';
+
+    const highlights = boardEl.querySelectorAll('square.last-move');
+    if (highlights.length === 0) {
+      return ourColor === 'white';
+    }
+
+    const boardRect = boardEl.getBoundingClientRect();
+    const squareSize = boardRect.width / 8;
+    const isFlipped = cgWrap ? cgWrap.classList.contains('orientation-black') : false;
+
+    let lastMoveColor = null;
+
+    highlights.forEach(el => {
+      const { file, rank } = getSquareFromTransform(el, squareSize);
+      if (file >= 0 && file < 8 && rank >= 0 && rank < 8) {
+        const boardFile = isFlipped ? 7 - file : file;
+        const boardRank = isFlipped ? rank : 7 - rank;
+        const piece = board[boardRank][boardFile];
+        if (piece) {
+          const isWhite = piece === piece.toUpperCase();
+          lastMoveColor = isWhite ? 'white' : 'black';
+        }
+      }
+    });
+
+    if (lastMoveColor) {
+      const nextTurn = lastMoveColor === 'white' ? 'black' : 'white';
+      return ourColor === nextTurn;
+    }
+
+    return ourColor === 'white';
+  }
+
   let boardEl = null;
   let cgWrap = null;
   let observer = null;
@@ -52,7 +192,7 @@
 
     
     const tc = detectTimeControl();
-    Bridge.sendInit(currentGameId, ourColor, tc.timeControl, tc.increment);
+    initNewGame(currentGameId, ourColor, tc.timeControl, tc.increment);
 
     
     observer = new MutationObserver(onBoardChange);
@@ -78,7 +218,7 @@
       detectColor();
       if (ourColor !== prevColor) {
         console.log('[StockfishBridge] Color changed to:', ourColor);
-        Bridge.sendInit(currentGameId, ourColor, 0, 0);
+        initNewGame(currentGameId, ourColor, 0, 0);
       }
     }, 2000);
   }
@@ -130,23 +270,35 @@
 
       
       const transform = el.style.transform || '';
-      const computedStyle = transform || window.getComputedStyle(el).transform;
-
+      const computedTransform = window.getComputedStyle(el).transform || '';
       let file = -1, rank = -1;
 
-      
-      let translateMatch = transform.match(/translate\(\s*([\d.]+)%\s*,\s*([\d.]+)%\s*\)/);
-      if (translateMatch) {
-        const xPercent = parseFloat(translateMatch[1]);
-        const yPercent = parseFloat(translateMatch[2]);
-        file = Math.round(xPercent / 12.5);
-        rank = Math.round(yPercent / 12.5);
+      let m3d = transform.match(/translate3d\(\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\)/i) ||
+                computedTransform.match(/translate3d\(\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\)/i);
+      if (m3d) {
+        const valX = parseFloat(m3d[1]);
+        const unitX = m3d[2];
+        const valY = parseFloat(m3d[3]);
+        const unitY = m3d[4];
+        file = (unitX === '%' || (!unitX && Math.abs(valX) <= 100)) ? Math.round(valX / 12.5) : (squareSize > 0 ? Math.round(valX / squareSize) : -1);
+        rank = (unitY === '%' || (!unitY && Math.abs(valY) <= 100)) ? Math.round(valY / 12.5) : (squareSize > 0 ? Math.round(valY / squareSize) : -1);
       } else {
-        
-        translateMatch = transform.match(/translate\(\s*([\d.]+)px\s*,\s*([\d.]+)px\s*\)/);
-        if (translateMatch && squareSize > 0) {
-          file = Math.round(parseFloat(translateMatch[1]) / squareSize);
-          rank = Math.round(parseFloat(translateMatch[2]) / squareSize);
+        let m2d = transform.match(/translate\(\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\)/i) ||
+                  computedTransform.match(/translate\(\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\)/i);
+        if (m2d) {
+          const valX = parseFloat(m2d[1]);
+          const unitX = m2d[2];
+          const valY = parseFloat(m2d[3]);
+          const unitY = m2d[4];
+          file = (unitX === '%' || (!unitX && Math.abs(valX) <= 100)) ? Math.round(valX / 12.5) : (squareSize > 0 ? Math.round(valX / squareSize) : -1);
+          rank = (unitY === '%' || (!unitY && Math.abs(valY) <= 100)) ? Math.round(valY / 12.5) : (squareSize > 0 ? Math.round(valY / squareSize) : -1);
+        } else {
+          let mMat = transform.match(/matrix\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\)/i) ||
+                    computedTransform.match(/matrix\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\)/i);
+          if (mMat && squareSize > 0) {
+            file = Math.round(parseFloat(mMat[5]) / squareSize);
+            rank = Math.round(parseFloat(mMat[6]) / squareSize);
+          }
         }
       }
 
@@ -166,19 +318,9 @@
       }
 
       
-      const classes = el.className.split(/\s+/);
-      const isWhite = classes.includes('white');
-      let pieceType = null;
-
-      if (classes.includes('pawn')) pieceType = 'p';
-      else if (classes.includes('knight')) pieceType = 'n';
-      else if (classes.includes('bishop')) pieceType = 'b';
-      else if (classes.includes('rook')) pieceType = 'r';
-      else if (classes.includes('queen')) pieceType = 'q';
-      else if (classes.includes('king')) pieceType = 'k';
-
-      if (pieceType !== null && file >= 0 && file < 8 && rank >= 0 && rank < 8) {
-        board[rank][file] = isWhite ? pieceType.toUpperCase() : pieceType;
+      const piece = identifyPieceType(el);
+      if (piece && file >= 0 && file < 8 && rank >= 0 && rank < 8) {
+        board[rank][file] = piece;
       }
     });
 
@@ -202,14 +344,58 @@
     }
 
     
-    const activeColor = isOurTurn()
+    const ourTurn = isOurTurn(board);
+    const activeColor = ourTurn
       ? (ourColor === 'white' ? 'w' : 'b')
       : (ourColor === 'white' ? 'b' : 'w');
 
-    
-    fen += ` ${activeColor} KQkq - 0 1`;
+    if (board[0][4] !== 'K') { castlingRights.K = false; castlingRights.Q = false; }
+    if (board[0][0] !== 'R') { castlingRights.Q = false; }
+    if (board[0][7] !== 'R') { castlingRights.K = false; }
+    if (board[7][4] !== 'k') { castlingRights.k = false; castlingRights.q = false; }
+    if (board[7][0] !== 'r') { castlingRights.q = false; }
+    if (board[7][7] !== 'r') { castlingRights.k = false; }
 
-    return fen;
+    function boardsEqual(b1, b2) {
+      if (!b1 || !b2) return false;
+      for (let r = 0; r < 8; r++) {
+        for (let f = 0; f < 8; f++) {
+          if (b1[r][f] !== b2[r][f]) return false;
+        }
+      }
+      return true;
+    }
+
+    if (!prevBoard) {
+      prevBoard = board.map(row => [...row]);
+      enPassantSquare = '-';
+    } else if (!boardsEqual(board, prevBoard)) {
+      let epTarget = '-';
+      const filesAlgebraic = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+      for (let f = 0; f < 8; f++) {
+        if (prevBoard[1][f] === 'P' && board[3][f] === 'P' && !board[1][f]) {
+          epTarget = filesAlgebraic[f] + '3';
+          break;
+        }
+        if (prevBoard[6][f] === 'p' && board[4][f] === 'p' && !board[6][f]) {
+          epTarget = filesAlgebraic[f] + '6';
+          break;
+        }
+      }
+      enPassantSquare = epTarget;
+      prevBoard = board.map(row => [...row]);
+    }
+
+    let castlingStr = '';
+    if (castlingRights.K) castlingStr += 'K';
+    if (castlingRights.Q) castlingStr += 'Q';
+    if (castlingRights.k) castlingStr += 'k';
+    if (castlingRights.q) castlingStr += 'q';
+    if (!castlingStr) castlingStr = '-';
+
+    fen += ` ${activeColor} ${castlingStr} ${enPassantSquare} 0 1`;
+
+    return { fen, ourTurn };
   }
 
   
@@ -244,7 +430,7 @@
   }
 
   
-  function isOurTurn() {
+  function isOurTurn(board) {
     try {
       
       const bottomClock = document.querySelector(
@@ -261,10 +447,12 @@
         
         return rect.top > window.innerHeight / 2;
       }
+
+      return isOurTurnFallback(board);
     } catch (e) {
-      
+      console.warn('[StockfishBridge] Error in isOurTurn:', e);
+      return isOurTurnFallback(board);
     }
-    return false;
   }
 
   
@@ -309,13 +497,13 @@
   
   function sendCurrentState() {
     try {
-      const fen = readBoardFEN();
-      if (!fen) return;
+      const result = readBoardFEN();
+      if (!result) return;
+      const { fen, ourTurn } = result;
       if (fen === lastSentFen) return;
       lastSentFen = fen;
 
       const clocks = readClocks();
-      const ourTurn = isOurTurn();
 
       Bridge.sendState(
         fen,
@@ -447,8 +635,10 @@
         if (promoContainer) {
           const pieces = promoContainer.querySelectorAll('piece, square');
           
-          const orderMap = { q: 0, n: 1, r: 2, b: 3 };
-          const targetIndex = orderMap[pieceChar] || 0;
+          const orderMap = ourColor === 'black'
+            ? { b: 0, r: 1, n: 2, q: 3 }
+            : { q: 0, n: 1, r: 2, b: 3 };
+          const targetIndex = orderMap[pieceChar] !== undefined ? orderMap[pieceChar] : 0;
           if (pieces[targetIndex]) {
             pieces[targetIndex].click();
             console.log('[StockfishBridge] Promotion selected by index:', targetIndex);

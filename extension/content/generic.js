@@ -147,10 +147,13 @@
   }
 
   function findPieceElements() {
-    
-    let pieces = boardEl.querySelectorAll(
-      'piece, [class*="piece"], [class*="pawn"], img[src*="piece"], svg[class*="piece"]'
-    );
+    const pieceSelectors = [
+      'piece', '[class*="piece"]', '[class*="pawn"]', 'img[src*="piece"]', 'svg[class*="piece"]',
+      'div[class*="wp"]', 'div[class*="bp"]', 'div[class*="wn"]', 'div[class*="bn"]',
+      'div[class*="wb"]', 'div[class*="bb"]', 'div[class*="wr"]', 'div[class*="br"]',
+      'div[class*="wq"]', 'div[class*="bq"]', 'div[class*="wk"]', 'div[class*="bk"]'
+    ];
+    let pieces = boardEl.querySelectorAll(pieceSelectors.join(', '));
     
     return Array.from(pieces).filter(el => {
       const cls = el.className.toString();
@@ -161,41 +164,49 @@
   function identifyPieceType(el) {
     const classes = el.className.toString().toLowerCase();
     const src = (el.src || el.getAttribute('src') || '').toLowerCase();
+    const dataPiece = (el.getAttribute('data-piece') || el.getAttribute('data-cid') || el.getAttribute('piece') || '').toLowerCase();
     
     let color = null;
     let type = null;
 
-    
-    if (classes.includes('white') || classes.includes('wp') || classes.includes('wn') || 
-        classes.includes('wb') || classes.includes('wr') || classes.includes('wq') || 
-        classes.includes('wk') || src.includes('/w') || src.includes('white')) {
-      color = 'w';
-    } else if (classes.includes('black') || classes.includes('bp') || classes.includes('bn') || 
-               classes.includes('bb') || classes.includes('br') || classes.includes('bq') || 
-               classes.includes('bk') || src.includes('/b') || src.includes('black')) {
-      color = 'b';
-    }
-
-    
-    const mappings = {
-      pawn: 'p', rook: 'r', knight: 'n', bishop: 'b', queen: 'q', king: 'k',
-      wp: 'p', wn: 'n', wb: 'b', wr: 'r', wq: 'q', wk: 'k',
-      bp: 'p', bn: 'n', bb: 'b', br: 'r', bq: 'q', bk: 'k'
-    };
-
-    for (const [key, val] of Object.entries(mappings)) {
-      if (classes.includes(key) || src.includes(key)) {
-        type = val;
-        break;
+    // 1. Check data-piece or data-cid attributes
+    if (dataPiece) {
+      if (dataPiece.startsWith('w') || dataPiece.includes('white')) color = 'w';
+      else if (dataPiece.startsWith('b') || dataPiece.includes('black')) color = 'b';
+      
+      const char = dataPiece.replace('white', '').replace('black', '').replace('w', '').replace('b', '').trim()[0];
+      if (char && 'pnbrqk'.includes(char)) {
+        type = char;
       }
     }
-    
-    
-    if (!type) {
-      const match = classes.match(/\b([wb])([pnbrqk])\b/);
-      if (match) {
-        color = match[1];
-        type = match[2];
+
+    // 2. Check classes and image src
+    if (!color || !type) {
+      if (classes.includes('white') || src.includes('white') || src.includes('/w') || classes.includes('class-w')) {
+        color = 'w';
+      } else if (classes.includes('black') || src.includes('black') || src.includes('/b') || classes.includes('class-b')) {
+        color = 'b';
+      }
+
+      const mappings = {
+        pawn: 'p', rook: 'r', knight: 'n', bishop: 'b', queen: 'q', king: 'k',
+        wp: 'p', wn: 'n', wb: 'b', wr: 'r', wq: 'q', wk: 'k',
+        bp: 'p', bn: 'n', bb: 'b', br: 'r', bq: 'q', bk: 'k'
+      };
+
+      for (const [key, val] of Object.entries(mappings)) {
+        if (classes.includes(key) || src.includes(key)) {
+          type = val;
+          break;
+        }
+      }
+      
+      if (!type) {
+        const match = classes.match(/\b([wb])([pnbrqk])\b/);
+        if (match) {
+          color = match[1];
+          type = match[2];
+        }
       }
     }
 

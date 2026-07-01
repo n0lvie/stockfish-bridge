@@ -4,6 +4,75 @@
   'use strict';
 
   const SITE = 'chess.com';
+
+  let castlingRights = { K: true, Q: true, k: true, q: true };
+  let enPassantSquare = '-';
+  let prevBoard = null;
+
+  function resetGameState() {
+    castlingRights = { K: true, Q: true, k: true, q: true };
+    enPassantSquare = '-';
+    prevBoard = null;
+    console.log('[StockfishBridge] Game state reset (castling & en passant)');
+  }
+
+  function initNewGame(gameId, color, timeControl, increment) {
+    resetGameState();
+    Bridge.sendInit(gameId, color, timeControl, increment);
+  }
+
+  function getElementClassString(el) {
+    if (!el) return '';
+    if (typeof el.className === 'string') return el.className;
+    if (el.className && typeof el.className.baseVal === 'string') return el.className.baseVal;
+    return el.getAttribute('class') || '';
+  }
+
+  function identifyPieceType(el) {
+    const rawClass = getElementClassString(el);
+    const classes = rawClass.toLowerCase();
+    const src = (el.src || el.getAttribute('src') || '').toLowerCase();
+
+    let color = null;
+    let type = null;
+
+    if (classes.includes('white') || classes.includes('wp') || classes.includes('wn') || 
+        classes.includes('wb') || classes.includes('wr') || classes.includes('wq') || 
+        classes.includes('wk') || src.includes('/w') || src.includes('white')) {
+      color = 'w';
+    } else if (classes.includes('black') || classes.includes('bp') || classes.includes('bn') || 
+               classes.includes('bb') || classes.includes('br') || classes.includes('bq') || 
+               classes.includes('bk') || src.includes('/b') || src.includes('black')) {
+      color = 'b';
+    }
+
+    const mappings = {
+      pawn: 'p', rook: 'r', knight: 'n', bishop: 'b', queen: 'q', king: 'k',
+      wp: 'p', wn: 'n', wb: 'b', wr: 'r', wq: 'q', wk: 'k',
+      bp: 'p', bn: 'n', bb: 'b', br: 'r', bq: 'q', bk: 'k'
+    };
+
+    for (const [key, val] of Object.entries(mappings)) {
+      if (classes.includes(key) || src.includes(key)) {
+        type = val;
+        break;
+      }
+    }
+
+    if (!type) {
+      const match = classes.match(/([wb])([pnbrqk])/);
+      if (match) {
+        color = match[1];
+        type = match[2];
+      }
+    }
+
+    if (color && type) {
+      return color === 'w' ? type.toUpperCase() : type.toLowerCase();
+    }
+    return null;
+  }
+
   let boardEl = null;
   let observer = null;
   let clockInterval = null;
@@ -55,7 +124,7 @@
     Bridge.onConnect(() => {
       console.log('[StockfishBridge] Connection active, sending init and forcing state sync...');
       const tc = detectTimeControl();
-      Bridge.sendInit(currentGameId, ourColor, tc.timeControl, tc.increment);
+      initNewGame(currentGameId, ourColor, tc.timeControl, tc.increment);
       sendCurrentState(true);
     });
 
@@ -93,7 +162,7 @@
       detectColor();
       if (ourColor !== prevColor) {
         console.log('[StockfishBridge] Color changed to:', ourColor);
-        Bridge.sendInit(currentGameId, ourColor, 0, 0);
+        initNewGame(currentGameId, ourColor, 0, 0);
       }
     }, 2000);
   }
@@ -125,26 +194,19 @@
     const board = Array(8).fill(null).map(() => Array(8).fill(null));
 
     pieces.forEach(el => {
-      const rawClass = (typeof el.className === 'string') ? el.className : (el.getAttribute('class') || '');
+      const rawClass = getElementClassString(el);
       const classes = rawClass.split(/\s+/);
-      let file = -1, rank = -1, piece = null;
+      let file = -1, rank = -1;
 
       for (const cls of classes) {
-        
         const sqMatch = cls.match(/^square-(\d)(\d)$/);
         if (sqMatch) {
           file = parseInt(sqMatch[1]) - 1; 
           rank = parseInt(sqMatch[2]) - 1;
         }
-
-        
-        const pieceMatch = cls.match(/^([wb])([pnbrqk])$/);
-        if (pieceMatch) {
-          const color = pieceMatch[1];
-          const type = pieceMatch[2];
-          piece = color === 'w' ? type.toUpperCase() : type.toLowerCase();
-        }
       }
+
+      const piece = identifyPieceType(el);
 
       if (file >= 0 && file < 8 && rank >= 0 && rank < 8 && piece) {
         board[rank][file] = piece;
@@ -175,7 +237,51 @@
       ? (ourColor === 'white' ? 'w' : 'b')
       : (ourColor === 'white' ? 'b' : 'w');
 
-    fen += ` ${activeColor} KQkq - 0 1`;
+    if (board[0][4] !== 'K') { castlingRights.K = false; castlingRights.Q = false; }
+    if (board[0][0] !== 'R') { castlingRights.Q = false; }
+    if (board[0][7] !== 'R') { castlingRights.K = false; }
+    if (board[7][4] !== 'k') { castlingRights.k = false; castlingRights.q = false; }
+    if (board[7][0] !== 'r') { castlingRights.q = false; }
+    if (board[7][7] !== 'r') { castlingRights.k = false; }
+
+    function boardsEqual(b1, b2) {
+      if (!b1 || !b2) return false;
+      for (let r = 0; r < 8; r++) {
+        for (let f = 0; f < 8; f++) {
+          if (b1[r][f] !== b2[r][f]) return false;
+        }
+      }
+      return true;
+    }
+
+    if (!prevBoard) {
+      prevBoard = board.map(row => [...row]);
+      enPassantSquare = '-';
+    } else if (!boardsEqual(board, prevBoard)) {
+      let epTarget = '-';
+      const filesAlgebraic = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+      for (let f = 0; f < 8; f++) {
+        if (prevBoard[1][f] === 'P' && board[3][f] === 'P' && !board[1][f]) {
+          epTarget = filesAlgebraic[f] + '3';
+          break;
+        }
+        if (prevBoard[6][f] === 'p' && board[4][f] === 'p' && !board[6][f]) {
+          epTarget = filesAlgebraic[f] + '6';
+          break;
+        }
+      }
+      enPassantSquare = epTarget;
+      prevBoard = board.map(row => [...row]);
+    }
+
+    let castlingStr = '';
+    if (castlingRights.K) castlingStr += 'K';
+    if (castlingRights.Q) castlingStr += 'Q';
+    if (castlingRights.k) castlingStr += 'k';
+    if (castlingRights.q) castlingStr += 'q';
+    if (!castlingStr) castlingStr = '-';
+
+    fen += ` ${activeColor} ${castlingStr} ${enPassantSquare} 0 1`;
 
     return { fen, ourTurn };
   }
@@ -199,7 +305,7 @@
         });
 
         const bottomClockText = findClockText(sorted[0]);
-        const topClockText = findClockText(sorted[1]);
+        const topClockText = findClockText(sorted[sorted.length - 1]);
 
         ourTimeMs = parseTimeString(bottomClockText);
         oppTimeMs = parseTimeString(topClockText);
@@ -272,10 +378,12 @@
         }
 
         if (highlights.length > 0) {
-          let lastMoveColor = null;
+          let hasOpponentPieceHighlight = false;
+          let hasEmptyHighlight = false;
+          let parsedHighlights = [];
 
           for (const hl of highlights) {
-            const hClasses = (typeof hl.className === 'string') ? hl.className : (hl.getAttribute('class') || '');
+            const hClasses = getElementClassString(hl);
             const sqMatch = hClasses.match(/square-(\d)(\d)/);
             if (sqMatch) {
               const file = parseInt(sqMatch[1]) - 1;
@@ -285,10 +393,28 @@
                 const piece = board[rank][file];
                 if (piece) {
                   const isWhite = piece === piece.toUpperCase();
-                  lastMoveColor = isWhite ? 'white' : 'black';
-                  break;
+                  const pieceColor = isWhite ? 'white' : 'black';
+                  if (pieceColor !== ourColor) {
+                    hasOpponentPieceHighlight = true;
+                  }
+                  parsedHighlights.push({ piece, color: pieceColor, isEmpty: false });
+                } else {
+                  hasEmptyHighlight = true;
+                  parsedHighlights.push({ piece: null, color: null, isEmpty: true });
                 }
               }
+            }
+          }
+
+          let lastMoveColor = null;
+          for (const ph of parsedHighlights) {
+            if (!ph.isEmpty) {
+              if (ph.color === ourColor && (!hasEmptyHighlight || hasOpponentPieceHighlight)) {
+                // Ignore selection highlight
+                continue;
+              }
+              lastMoveColor = ph.color;
+              break;
             }
           }
 

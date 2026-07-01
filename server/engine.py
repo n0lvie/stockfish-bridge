@@ -1,4 +1,4 @@
-utf-8"""
+"""
 Async Stockfish UCI wrapper for the Chess Bridge server.
 
 Manages a Stockfish subprocess via the Universal Chess Interface (UCI)
@@ -59,66 +59,30 @@ class StockfishEngine:
                                          
         await self._send(f"setoption name {name} value {value}")
 
+    def _get_optimal_settings(self):
+        import psutil
+        # 1/3 of all CPU cores
+        cpu_cores = psutil.cpu_count(logical=True) or 1
+        optimal_threads = max(1, cpu_cores // 3)
+
+        # 50% of available RAM
+        free_ram_mb = int(psutil.virtual_memory().available / (1024 * 1024))
+        target_hash_mb = free_ram_mb // 2
+
+        # Round down to nearest power of 2 (up to 8GB)
+        hash_size = 128
+        for p in [128, 256, 512, 1024, 2048, 4096, 8192]:
+            if p <= target_hash_mb:
+                hash_size = p
+            else:
+                break
+        return optimal_threads, hash_size
+
     async def configure_adaptive_params(self, our_time_ms, opp_time_ms, increment_ms, move_number, last_score_cp, last_score_type):
         if not self._alive:
             return
-
-        if not self.is_auto_mode:
-            target_threads = self.manual_threads
-            target_hash = self.manual_hash
-            logger.info(f"[AdaptiveEngine] Manual Mode: Threads={target_threads}, Hash={target_hash}MB")
-        else:
-            import psutil
-
-            target_threads = max(1, self.cpu_cores // 2)
-            target_hash = 256
-            
-            is_critical = False
-            reason = "Normal position"
-
-            if last_score_type == "mate":
-                is_critical = True
-                reason = "Forced mate sequence"
-            elif last_score_type == "cp":
-                if last_score_cp < -50:
-                    is_critical = True
-                    reason = f"Losing position ({last_score_cp} cp)"
-                elif -120 <= last_score_cp <= 120:
-                    is_critical = True
-                    reason = f"Tense position ({last_score_cp} cp)"
-                    
-            if our_time_ms < 60000:
-                is_critical = True
-                reason = f"Low time pressure ({our_time_ms/1000:.1f}s)"
-                
-            if is_critical:
-                                                                  
-                max_threads = max(1, int(self.cpu_cores * self.quality_factor))
-                target_threads = min(max_threads, self.cpu_cores)
-                
-                free_ram_mb = int(psutil.virtual_memory().available / (1024 * 1024))
-                target_hash = min(2048, max(512, free_ram_mb // 2))
-                logger.info(f"[AdaptiveEngine] CRITICAL peak scaling: Threads={target_threads}, Hash={target_hash}MB ({reason})")
-            else:
-                system_cpu = psutil.cpu_percent()
-                if system_cpu > 90:
-                    target_threads = max(1, self.cpu_cores // 2)
-                    target_hash = 256
-                    logger.info(f"[AdaptiveEngine] Extreme system load ({system_cpu}%). Threads={target_threads}, Hash={target_hash}MB")
-                else:
-                    target_threads = max(1, int(self.cpu_cores * 0.75))
-                    target_hash = 512
-                    logger.info(f"[AdaptiveEngine] Standard scaling: Threads={target_threads}, Hash={target_hash}MB")
-
-        try:
-            if target_threads != self._current_threads:
-                await self.set_option("Threads", target_threads)
-                self._current_threads = target_threads
-            if target_hash != self._current_hash:
-                await self.set_option("Hash", target_hash)
-                self._current_hash = target_hash
-        except Exception as e:
-            logger.error(f"Failed to update engine parameters: {e}")
+        # Log status without resizing hash/threads mid-game to preserve transposition tables
+        logger.info(f"[AdaptiveEngine] Engine status: Threads={self._current_threads}, Hash={self._current_hash}MB, FEN Turn={move_number}")
 
     @property
     def is_thinking(self):
@@ -146,10 +110,27 @@ class StockfishEngine:
         except asyncio.TimeoutError:
             raise RuntimeError("Stockfish did not respond with 'uciok' within 10 s")
 
+        # Determine Threads and Hash based on optimization rules
+        if self.is_auto_mode:
+            opt_threads, opt_hash = self._get_optimal_settings()
+            self._threads = opt_threads
+            self._hash_mb = opt_hash
+            logger.info(f"[Auto-Tuning] Configured Stockfish (Auto): Threads={self._threads}, Hash={self._hash_mb}MB")
+        else:
+            self._threads = self._threads or self.manual_threads
+            self._hash_mb = self._hash_mb or self.manual_hash
+            logger.info(f"[Auto-Tuning] Configured Stockfish (Manual): Threads={self._threads}, Hash={self._hash_mb}MB")
+
         if self._threads is not None:
             await self._send("setoption name Threads value %d" % self._threads)
+            self._current_threads = self._threads
         if self._hash_mb is not None:
             await self._send("setoption name Hash value %d" % self._hash_mb)
+            self._current_hash = self._hash_mb
+
+        # Enforce pure calculation using NNUE, disable SyzygyPath
+        await self._send("setoption name Use NNUE value true")
+        await self._send("setoption name SyzygyPath value <none>")
         await self._send("setoption name UCI_AnalyseMode value true")
         if self._multi_pv > 1:
             await self._send("setoption name MultiPV value %d" % self._multi_pv)
@@ -240,6 +221,17 @@ class StockfishEngine:
 
         if self._is_thinking:
             await self.stop()
+
+        # Re-verify and apply optimal hardware configuration for new game
+        if self.is_auto_mode:
+            opt_threads, opt_hash = self._get_optimal_settings()
+            if opt_threads != self._current_threads:
+                await self.set_option("Threads", opt_threads)
+                self._current_threads = opt_threads
+            if opt_hash != self._current_hash:
+                await self.set_option("Hash", opt_hash)
+                self._current_hash = opt_hash
+            logger.info(f"[Auto-Tuning] Applying Hardware optimization: Threads={self._current_threads}, Hash={self._current_hash}MB")
 
         await self._send("ucinewgame")
         self._ready_event.clear()

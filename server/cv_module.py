@@ -1,4 +1,4 @@
-utf-8import os
+import os
 import time
 import logging
 from PIL import Image, ImageOps
@@ -12,7 +12,7 @@ class BoardDetector:
     @staticmethod
     def capture_screenshot():
                                           
-        with mss.mss() as sct:
+        with mss.MSS() as sct:
                                               
             monitor = sct.monitors[1]
             sct_img = sct.grab(monitor)

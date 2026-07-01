@@ -1,5 +1,3 @@
-utf-8                       
-
 import struct
 import zlib
 import os

@@ -1,4 +1,4 @@
-utf-8"""
+"""
 Stockfish Chess Bridge v2.0 – WebSocket Server & Orchestrator.
 
 Combines Chrome Extension bridging, CV visual automation, 
@@ -225,6 +225,8 @@ class ChessBridge:
                     await self._handle_clock(msg)
                 elif msg_type == "game_over":
                     await self._handle_game_over(msg)
+                elif msg_type == "debug":
+                    logger.info(f"[CLIENT DEBUG] {msg.get('message')}: {json.dumps(msg.get('data'))}")
         except websockets.exceptions.ConnectionClosed:
             logger.info("Chrome Extension disconnected.")
         finally:
@@ -368,7 +370,7 @@ class ChessBridge:
     async def _monitor_loop(self, ws, engine):
         think_start = time.monotonic()
 
-        soft_limit_ms = self._strategy.calculate_soft_limit(
+        target_time_ms, target_depth, speed_name = self._strategy.get_decision_params(
             our_time_ms=self._our_time_ms,
             opp_time_ms=self._opp_time_ms,
             increment_ms=self._increment_ms,
@@ -377,28 +379,40 @@ class ChessBridge:
             last_score_type=self._last_score_type
         )
         
+        logger.info(f"[TimeManager] Gear shifted to: {speed_name} | Target Time: {target_time_ms} ms | Target Depth: {target_depth}")
+        
         try:
             while engine.is_thinking and self._game_active:
-                await asyncio.sleep(0.05)            
+                await asyncio.sleep(0.02)            # slightly faster polling for precise time management
                 
                 elapsed_ms = int((time.monotonic() - think_start) * 1000)
-                estimated_our = self._our_time_ms - elapsed_ms
+                estimated_our = self._our_time_ms - elapsed_ms if self._our_time_ms > 0 else 0
                 
-                should_move = self._strategy.should_move_now(
+                should_move = False
+                
+                # Check safety clock buffer
+                if self._strategy.should_move_now(
                     estimated_our,
                     self._opp_time_ms,
                     self._increment_ms,
                     self._move_number,
                     self._last_score_cp,
                     self._last_score_type
-                )
-                
-                if elapsed_ms >= soft_limit_ms:
+                ):
+                    logger.info("Decision: PLAY MOVE - clock near safety buffer!")
+                    should_move = True
+                    
+                # Check target depth limit
+                elif engine.current_depth >= target_depth:
+                    logger.info(f"Decision: PLAY MOVE - Target depth reached ({engine.current_depth} >= {target_depth})")
+                    should_move = True
+                    
+                # Check target time limit
+                elif target_time_ms is not None and elapsed_ms >= target_time_ms:
+                    logger.info(f"Decision: PLAY MOVE - Target time limit reached ({elapsed_ms}ms >= {target_time_ms}ms)")
                     should_move = True
                     
                 if should_move:
-                    logger.info(f"Decision: PLAY MOVE - Elapsed={elapsed_ms}ms, SoftLimit={soft_limit_ms}ms")
-                    
                     best_move = await engine.stop()
                     best_move = best_move or engine.best_move_so_far
                     
@@ -418,9 +432,7 @@ class ChessBridge:
                             await self._send(ws, move_msg)
                             await self._send(ws, {"type": "status", "state": "stopped"})
                     elif self._mode == "cv":
-                                                                    
                         if self._autoplay:
-                                                                                               
                             success = await asyncio.get_running_loop().run_in_executor(
                                 None,
                                 control_module.execute_move,
@@ -430,7 +442,6 @@ class ChessBridge:
                                 True                
                             )
                             if success:
-                                                         
                                 self._is_our_turn = False
                                 
                     return
