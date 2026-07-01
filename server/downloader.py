@@ -48,16 +48,15 @@ def verify_binary(binary_path):
             
     try:
         proc = subprocess.Popen(
-            [binary_path],
-            stdin=subprocess.PIPE,
+            [binary_path, "bench", "16", "1", "1"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True
         )
-        stdout, _ = proc.communicate(input="uci\nquit\n", timeout=3)
-        return "uciok" in stdout
+        stdout, stderr = proc.communicate(timeout=10)
+        return proc.returncode == 0 and ("Nodes/second" in stdout or "Nodes/second" in stderr)
     except Exception as e:
-        logger.debug(f"Verification failed for {binary_path}: {e}")
+        logger.error(f"Verification failed for {binary_path}: {e}\nstdout: {stdout if 'stdout' in locals() else 'None'}\nstderr: {stderr if 'stderr' in locals() else 'None'}")
         return False
 
 def download_and_extract(url, filename):
