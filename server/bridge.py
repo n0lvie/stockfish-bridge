@@ -276,6 +276,7 @@ class ChessBridge:
             await self._send(ws, {"type": "status", "state": "ready"})
 
     async def _handle_state(self, ws, msg):
+        self._game_active = True
         fen = msg.get("fen", "")
         our_time = int(msg.get("ourTimeMs", 300000))
         opp_time = int(msg.get("oppTimeMs", 300000))

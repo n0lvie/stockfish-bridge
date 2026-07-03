@@ -17,14 +17,17 @@ let lastEngineInfo = {};
 let currentGameInfo = {};
 let messageQueue = [];
 
-chrome.storage.local.get(['serverUrl', 'autoPlay'], (result) => {
+chrome.storage.local.get(['serverUrl', 'autoPlay', 'activeTabId'], (result) => {
   if (result.serverUrl) {
     currentServerUrl = result.serverUrl;
   }
   if (result.autoPlay !== undefined) {
     autoPlay = result.autoPlay;
   }
-  console.log('[StockfishBridge] Background initialized, server:', currentServerUrl, 'autoPlay:', autoPlay);
+  if (result.activeTabId !== undefined) {
+    activeTabId = result.activeTabId;
+  }
+  console.log('[StockfishBridge] Background initialized, server:', currentServerUrl, 'autoPlay:', autoPlay, 'activeTabId:', activeTabId);
   connectWebSocket(currentServerUrl);
 });
 
@@ -186,6 +189,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.target === 'background') {
       if (message.type === 'register') {
         activeTabId = sender.tab?.id || null;
+        chrome.storage.local.set({ activeTabId });
         console.log('[StockfishBridge] Content script registered from tab:', activeTabId, 'site:', message.site);
         sendResponse({ connected: wsConnected, autoPlay });
         return true;
@@ -301,6 +305,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (tabId === activeTabId) {
     activeTabId = null;
+    chrome.storage.local.remove('activeTabId');
     currentGameInfo = {};
     console.log('[StockfishBridge] Active tab closed');
   }
