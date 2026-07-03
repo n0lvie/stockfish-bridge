@@ -85,7 +85,7 @@
   let pollTimer = null;
   const DEBOUNCE_MS = 80;
   const CLOCK_POLL_MS = 200;
-  const BOARD_POLL_MS = 500;
+  const BOARD_POLL_MS = 10;
   const STATE_POLL_MS = 1000;
 
   
@@ -217,6 +217,7 @@
       
     }
 
+    updateClocks();
     clockInterval = setInterval(updateClocks, CLOCK_POLL_MS);
 
     pollTimer = setInterval(() => sendCurrentState(true), STATE_POLL_MS);
@@ -393,6 +394,22 @@
         ourTimeMs = bTime;
         oppTimeMs = wTime;
       }
+      if (ourTimeMs > 0 || oppTimeMs > 0) return { ourTimeMs, oppTimeMs };
+    }
+
+    // --- DOM FALLBACK ---
+    try {
+      const clockContainers = Array.from(document.querySelectorAll(
+        '[role="timer"], .clock-component, [class*="clock-container"], .clock-bottom, .clock-top'
+      ));
+
+      if (clockContainers.length >= 2) {
+        const sorted = clockContainers.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+        ourTimeMs = parseTimeString(findClockText(sorted[0]));
+        oppTimeMs = parseTimeString(findClockText(sorted[sorted.length - 1]));
+      }
+    } catch (e) {
+      console.warn('[StockfishBridge] Error reading clocks fallback:', e);
     }
 
     return { ourTimeMs, oppTimeMs };
@@ -411,6 +428,26 @@
     if (injectedState && injectedState.turn) {
       const turnColor = injectedState.turn === 'w' || injectedState.turn === 'white' ? 'white' : 'black';
       return ourColor === turnColor;
+    }
+
+    // --- DOM FALLBACK ---
+    try {
+      const bottomClock = document.querySelector('.clock-bottom, [data-cy="clock-bottom"]');
+      const topClock = document.querySelector('.clock-top, [data-cy="clock-top"]');
+
+      if (bottomClock && topClock) {
+        if (bottomClock.classList.contains('clock-player-turn') || bottomClock.hasAttribute('data-active')) return true;
+        if (topClock.classList.contains('clock-player-turn') || topClock.hasAttribute('data-active')) return false;
+      }
+      
+      const containers = document.querySelectorAll('.clock-component, [class*="clock-container"]');
+      if (containers.length >= 2) {
+        const sorted = Array.from(containers).sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+        if (sorted[0].classList.contains('clock-player-turn') || sorted[0].querySelector('.clock-player-turn')) return true;
+        if (sorted[sorted.length - 1].classList.contains('clock-player-turn') || sorted[sorted.length - 1].querySelector('.clock-player-turn')) return false;
+      }
+    } catch (e) {
+      console.warn('[StockfishBridge] Error in isOurTurn fallback:', e);
     }
     return false;
   }
@@ -613,8 +650,29 @@
 
   
   function detectGameState() {
+    const checkGameOver = () => {
+      try {
+        if (gameActive && (!injectedState || !injectedState.isGameOver)) {
+          const gameOverModal = document.querySelector('.game-over-modal, [class*="game-over"]');
+          if (gameOverModal) {
+            gameActive = false;
+            const resultText = gameOverModal.textContent || '';
+            let result = 'unknown';
+            if (/1-0|white\s*wins/i.test(resultText)) result = '1-0';
+            else if (/0-1|black\s*wins/i.test(resultText)) result = '0-1';
+            else if (/1\/2|draw|stalemate/i.test(resultText)) result = '1/2-1/2';
+            Bridge.sendGameOver(result);
+            console.log('[StockfishBridge] Game over detected via DOM fallback:', result);
+          }
+        }
+      } catch (e) {}
+    };
+    checkGameOver();
+
     const gameObserver = new MutationObserver(() => {
       try {
+        checkGameOver();
+
         const newBoard = document.querySelector('wc-chess-board, chess-board');
         if (newBoard && newBoard !== boardEl) {
           console.log('[StockfishBridge] New board detected, re-initializing');

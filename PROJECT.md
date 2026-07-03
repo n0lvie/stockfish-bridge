@@ -8,9 +8,9 @@
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|-------------|--------|
-| 1 | System Stability Audit | `server/bridge.py`, `server/engine.py`, `extension/background.js`. Focus on race conditions, unhandled states, and WebSocket orchestration. | none | IN_PROGRESS |
-| 2_3 | Extension & Move Execution Refactor | `extension/content/*.js`, `server/control_module.py`. Scrape all page data without brittle CSS classes AND ensure flawless move execution (refining `makeMove`). | none | PLANNED |
-| 4 | Final E2E Run | Pass 100% of E2E test suite + coverage hardening. | M1, M2_3, E2E Track | PLANNED |
+| 1 | System Stability Audit | `server/bridge.py`, `server/engine.py`, `extension/background.js`. Focus on race conditions, unhandled states, and WebSocket orchestration. | none | DONE |
+| 2_3 | Extension & Move Execution Refactor | `extension/content/*.js`, `server/control_module.py`. Scrape all page data without brittle CSS classes AND ensure flawless move execution (refining `makeMove`). | none | DONE |
+| 4 | Final E2E Run & Fallback Restore | `extension/content/chess_com.js`. Restore/rewrite DOM fallbacks for `isOurTurn`, `readClocks`, game over. Pass 100% of E2E tests (`test_playwright_features.py`). | M1, M2_3, E2E Track | IN_PROGRESS |
 
 ## Interface Contracts
 ### Server ↔ Extension
