@@ -223,7 +223,7 @@
     updateClocks();
     clockInterval = setInterval(updateClocks, CLOCK_POLL_MS);
 
-    pollTimer = setInterval(() => sendCurrentState(true), STATE_POLL_MS);
+    pollTimer = setInterval(() => sendCurrentState(false), STATE_POLL_MS);
 
     
     detectGameState();

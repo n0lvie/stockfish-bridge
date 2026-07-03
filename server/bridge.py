@@ -307,10 +307,15 @@ class ChessBridge:
             self._active_color = active_color
             return True
 
-        await self._stop_monitoring()
-        
         try:
             engine = await self._ensure_engine()
+            if self._current_fen == fen and engine.is_thinking:
+                self._our_time_ms = our_time
+                self._opp_time_ms = opp_time
+                self._increment_ms = increment
+                return True
+
+            await self._stop_monitoring()
             if engine.is_thinking:
                 await engine.stop()
 
