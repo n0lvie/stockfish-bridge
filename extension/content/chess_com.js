@@ -468,6 +468,35 @@
         if (sorted[0].classList.contains('clock-player-turn') || sorted[0].querySelector('.clock-player-turn')) return true;
         if (sorted[sorted.length - 1].classList.contains('clock-player-turn') || sorted[sorted.length - 1].querySelector('.clock-player-turn')) return false;
       }
+
+      // --- HIGHLIGHT FALLBACK (for untimed/bot games) ---
+      if (boardEl && board) {
+        let highlights = Array.from(boardEl.querySelectorAll('.highlight'));
+        if (highlights.length === 0 && boardEl.shadowRoot) {
+          highlights = Array.from(boardEl.shadowRoot.querySelectorAll('.highlight'));
+        }
+        if (highlights.length > 0) {
+          let opponentColor = ourColor === 'white' ? 'black' : 'white';
+          for (const hl of highlights) {
+            const hClasses = getElementClassString(hl);
+            const sqMatch = hClasses.match(/square-(\d)(\d)/);
+            if (sqMatch) {
+              const file = parseInt(sqMatch[1]) - 1;
+              const rank = parseInt(sqMatch[2]) - 1;
+              if (board[rank] && board[rank][file]) {
+                const piece = board[rank][file];
+                const pieceColor = piece === piece.toUpperCase() ? 'white' : 'black';
+                if (pieceColor === opponentColor) {
+                  return true;
+                }
+              }
+            }
+          }
+        } else {
+          // If no highlights at all, it's the start of the game. White starts.
+          return ourColor === 'white';
+        }
+      }
     } catch (e) {
       console.warn('[StockfishBridge] Error in isOurTurn fallback:', e);
     }
