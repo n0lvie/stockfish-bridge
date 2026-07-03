@@ -31,18 +31,18 @@
   function identifyPieceType(el) {
     const rawClass = getElementClassString(el);
     const classes = rawClass.toLowerCase();
+    const classList = classes.trim().split(/\s+/);
     const src = (el.src || el.getAttribute('src') || '').toLowerCase();
 
     let color = null;
     let type = null;
 
-    if (classes.includes('white') || classes.includes('wp') || classes.includes('wn') || 
-        classes.includes('wb') || classes.includes('wr') || classes.includes('wq') || 
-        classes.includes('wk') || src.includes('/w') || src.includes('white')) {
+    const whiteClasses = ['white', 'wp', 'wn', 'wb', 'wr', 'wq', 'wk'];
+    const blackClasses = ['black', 'bp', 'bn', 'bb', 'br', 'bq', 'bk'];
+
+    if (classList.some(c => whiteClasses.includes(c)) || src.includes('/w') || src.includes('white')) {
       color = 'w';
-    } else if (classes.includes('black') || classes.includes('bp') || classes.includes('bn') || 
-               classes.includes('bb') || classes.includes('br') || classes.includes('bq') || 
-               classes.includes('bk') || src.includes('/b') || src.includes('black')) {
+    } else if (classList.some(c => blackClasses.includes(c)) || src.includes('/b') || src.includes('black')) {
       color = 'b';
     }
 
@@ -53,17 +53,20 @@
     };
 
     for (const [key, val] of Object.entries(mappings)) {
-      if (classes.includes(key) || src.includes(key)) {
+      if (classList.includes(key) || src.includes(key)) {
         type = val;
         break;
       }
     }
 
     if (!type) {
-      const match = classes.match(/([wb])([pnbrqk])/);
-      if (match) {
-        color = match[1];
-        type = match[2];
+      for (const cls of classList) {
+        const match = cls.match(/^([wb])([pnbrqk])$/);
+        if (match) {
+          color = match[1];
+          type = match[2];
+          break;
+        }
       }
     }
 
@@ -399,14 +402,27 @@
 
     // --- DOM FALLBACK ---
     try {
-      const clockContainers = Array.from(document.querySelectorAll(
-        '[role="timer"], .clock-component, [class*="clock-container"], .clock-bottom, .clock-top'
-      ));
+      const bottomClock = document.querySelector('.clock-bottom, [data-cy="clock-bottom"]');
+      const topClock = document.querySelector('.clock-top, [data-cy="clock-top"]');
 
-      if (clockContainers.length >= 2) {
-        const sorted = clockContainers.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
-        ourTimeMs = parseTimeString(findClockText(sorted[0]));
-        oppTimeMs = parseTimeString(findClockText(sorted[sorted.length - 1]));
+      if (bottomClock && topClock && bottomClock.offsetParent !== null && topClock.offsetParent !== null) {
+        ourTimeMs = parseTimeString(findClockText(bottomClock));
+        oppTimeMs = parseTimeString(findClockText(topClock));
+      } else {
+        const boardRect = boardEl ? boardEl.getBoundingClientRect() : { top: 0, bottom: 2000 };
+        const clockContainers = Array.from(document.querySelectorAll(
+          '[role="timer"], .clock-component, [class*="clock-container"]'
+        )).filter(el => {
+          if (el.offsetParent === null) return false;
+          const rect = el.getBoundingClientRect();
+          return rect.top >= boardRect.top - 500 && rect.bottom <= boardRect.bottom + 500;
+        });
+
+        if (clockContainers.length >= 2) {
+          const sorted = clockContainers.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+          ourTimeMs = parseTimeString(findClockText(sorted[0]));
+          oppTimeMs = parseTimeString(findClockText(sorted[sorted.length - 1]));
+        }
       }
     } catch (e) {
       console.warn('[StockfishBridge] Error reading clocks fallback:', e);
@@ -440,9 +456,15 @@
         if (topClock.classList.contains('clock-player-turn') || topClock.hasAttribute('data-active')) return false;
       }
       
+      const boardRect = boardEl ? boardEl.getBoundingClientRect() : { top: 0, bottom: 2000 };
       const containers = document.querySelectorAll('.clock-component, [class*="clock-container"]');
-      if (containers.length >= 2) {
-        const sorted = Array.from(containers).sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+      const visibleContainers = Array.from(containers).filter(el => {
+        if (el.offsetParent === null) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.top >= boardRect.top - 500 && rect.bottom <= boardRect.bottom + 500;
+      });
+      if (visibleContainers.length >= 2) {
+        const sorted = visibleContainers.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
         if (sorted[0].classList.contains('clock-player-turn') || sorted[0].querySelector('.clock-player-turn')) return true;
         if (sorted[sorted.length - 1].classList.contains('clock-player-turn') || sorted[sorted.length - 1].querySelector('.clock-player-turn')) return false;
       }
@@ -653,7 +675,8 @@
     const checkGameOver = () => {
       try {
         if (gameActive && (!injectedState || !injectedState.isGameOver)) {
-          const gameOverModal = document.querySelector('.game-over-modal, [class*="game-over"]');
+          const gameOverNodes = document.querySelectorAll('.game-over-modal, [class*="game-over"]');
+          const gameOverModal = Array.from(gameOverNodes).find(el => el.offsetParent !== null && /(^|\s)game-over(-|\s|$)/i.test(el.className));
           if (gameOverModal) {
             gameActive = false;
             const resultText = gameOverModal.textContent || '';
