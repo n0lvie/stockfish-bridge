@@ -185,11 +185,14 @@ class ChessBridge:
                 with open(SETTINGS_FILE, "r") as f:
                     self._settings = json.load(f)
                 logger.info("Loaded settings from settings.json")
+                self._settings_mtime = os.path.getmtime(SETTINGS_FILE)
             except Exception as e:
                 logger.warning(f"Failed to read settings: {e}. Using defaults.")
                 self._settings = defaults
+                self._settings_mtime = None
         else:
             self._settings = defaults
+            self._settings_mtime = None
             self.save_settings()
 
     def save_settings(self):
@@ -197,6 +200,10 @@ class ChessBridge:
             with open(SETTINGS_FILE, "w") as f:
                 json.dump(self._settings, f, indent=4)
             logger.info("Saved settings to settings.json")
+            try:
+                self._settings_mtime = os.path.getmtime(SETTINGS_FILE)
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"Failed to save settings: {e}")
 
@@ -648,12 +655,13 @@ class ChessBridge:
             except (asyncio.CancelledError, Exception):
                 pass
 
-    async def _handle_settings_update(self, msg):
+    async def _handle_settings_update(self, msg, notify_clients=True, skip_save=False):
         for key in ("mode", "autoplay", "allocator", "threads", "hash", "hash_mb", "multipv", "multi_pv", "syzygy", "syzygy_path", "quality", "safety_buffer"):
             if key in msg:
                 self._settings[key] = msg[key]
                 
-        self.save_settings()
+        if not skip_save:
+            self.save_settings()
 
         self._autoplay = self._settings.get("autoplay", True)
         self._mode = self._settings.get("mode", "extension")
@@ -693,6 +701,150 @@ class ChessBridge:
             self.start_cv_loop()
         else:
             self.stop_cv_loop()
+
+    async def _watch_settings_file(self):
+        """Monitors settings.json for external modifications and dynamically applies them."""
+        while True:
+            try:
+                await asyncio.sleep(1.0)
+                if not os.path.exists(SETTINGS_FILE):
+                    continue
+                curr_mtime = os.path.getmtime(SETTINGS_FILE)
+                if self._settings_mtime is not None and curr_mtime > self._settings_mtime:
+                    self._settings_mtime = curr_mtime
+                    logger.info("[HotReload] settings.json modification detected, reloading...")
+                    try:
+                        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        await self._handle_settings_update(data, skip_save=True)
+                        logger.info("[HotReload] settings.json successfully applied dynamically.")
+                    except Exception as e:
+                        logger.warning(f"[HotReload] Failed to apply settings.json: {e}")
+                elif self._settings_mtime is None:
+                    self._settings_mtime = curr_mtime
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
+
+    async def _process_console_command(self, cmd_line: str):
+        """Processes interactive runtime commands sent via terminal stdin."""
+        parts = cmd_line.strip().split()
+        if not parts:
+            return
+        cmd = parts[0].lower()
+
+        if cmd in ("help", "?"):
+            print("\n" + "=" * 55)
+            print(" [Stockfish Bridge] Live Runtime Commands:")
+            print("   status                 - View current engine & bridge state")
+            print("   set threads <N>        - Change CPU threads (e.g. set threads 4)")
+            print("   set hash <MB>          - Change hash table memory (e.g. set hash 1024)")
+            print("   set multipv <N>        - Change analysis lines (e.g. set multipv 2)")
+            print("   set syzygy <path>      - Set Syzygy tablebases path")
+            print("   set buffer <ms>        - Change safety clock buffer (e.g. set buffer 1500)")
+            print("   set autoplay <on|off>  - Toggle auto move execution")
+            print("   set mode <ext|cv>      - Switch mode between browser extension and CV")
+            print("   save                   - Save current settings to settings.json")
+            print("=" * 55 + "\n")
+
+        elif cmd == "status":
+            engine = self._engine
+            th = self._settings.get("threads") or (engine._current_threads if engine else "N/A")
+            h = self._settings.get("hash") or (engine._current_hash if engine else "N/A")
+            pv = self._settings.get("multipv") or (engine._multi_pv if engine else 1)
+            syz = self._settings.get("syzygy_path") or (getattr(engine, "_syzygy_path", None) or "none")
+            print("\n" + "-" * 50)
+            print(f" [Live Bridge Status]")
+            print(f"   Threads:       {th}")
+            print(f"   Hash Memory:   {h} MB")
+            print(f"   MultiPV:       {pv} line(s)")
+            print(f"   Syzygy:        {syz}")
+            print(f"   Safety Buffer: {self._safety_buffer} ms")
+            print(f"   AutoPlay:      {self._autoplay}")
+            print(f"   Mode:          {self._mode}")
+            print(f"   Game Active:   {self._game_active}")
+            print("-" * 50 + "\n")
+
+        elif cmd == "set" and len(parts) >= 3:
+            param = parts[1].lower()
+            val_str = " ".join(parts[2:])
+
+            if param in ("threads", "thread", "t"):
+                try:
+                    val = int(val_str)
+                    await self._handle_settings_update({"threads": val})
+                    print(f"[+] Threads dynamically updated to {val}")
+                except ValueError:
+                    print("[-] Error: threads must be an integer.")
+
+            elif param in ("hash", "hash_mb", "h", "memory", "ram"):
+                try:
+                    val = int(val_str)
+                    await self._handle_settings_update({"hash": val})
+                    print(f"[+] Hash memory dynamically updated to {val} MB")
+                except ValueError:
+                    print("[-] Error: hash must be an integer in MB.")
+
+            elif param in ("multipv", "multi_pv", "pv", "lines"):
+                try:
+                    val = int(val_str)
+                    await self._handle_settings_update({"multipv": val})
+                    print(f"[+] MultiPV dynamically updated to {val}")
+                except ValueError:
+                    print("[-] Error: multipv must be an integer (1-5).")
+
+            elif param in ("syzygy", "syzygy_path", "tablebases"):
+                path_val = val_str.strip('"\'')
+                await self._handle_settings_update({"syzygy_path": path_val})
+                print(f"[+] Syzygy path dynamically updated to: {path_val}")
+
+            elif param in ("buffer", "safety_buffer", "buf"):
+                try:
+                    val = int(val_str)
+                    await self._handle_settings_update({"safety_buffer": val})
+                    print(f"[+] Safety clock buffer dynamically updated to {val} ms")
+                except ValueError:
+                    print("[-] Error: buffer must be an integer in milliseconds.")
+
+            elif param in ("autoplay", "auto"):
+                enabled = val_str.lower() in ("1", "true", "on", "yes")
+                await self._handle_settings_update({"autoplay": enabled})
+                print(f"[+] AutoPlay set to {enabled}")
+
+            elif param == "mode":
+                new_mode = "cv" if "cv" in val_str.lower() else "extension"
+                await self._handle_settings_update({"mode": new_mode})
+                print(f"[+] Mode switched to {new_mode}")
+
+            else:
+                print(f"[-] Unknown parameter '{param}'. Type 'help' for options.")
+
+        elif cmd == "save":
+            self.save_settings()
+            print("[+] Settings saved to settings.json.")
+
+        else:
+            print(f"[-] Unknown command '{cmd}'. Type 'help' for options.")
+
+    async def _interactive_console_loop(self):
+        """Asynchronously listens to stdin for interactive commands when running in a terminal."""
+        if not sys.stdin or not hasattr(sys.stdin, "isatty") or not sys.stdin.isatty():
+            return
+
+        logger.info("[Console] Interactive terminal active. Type 'help' for runtime commands.")
+        loop = asyncio.get_running_loop()
+        while True:
+            try:
+                line = await loop.run_in_executor(None, sys.stdin.readline)
+                if not line:
+                    break
+                cmd_str = line.strip()
+                if not cmd_str:
+                    continue
+                await self._process_console_command(cmd_str)
+            except (asyncio.CancelledError, Exception):
+                break
 
     async def _send_telemetry_to_dashboard(self, engine_info=None):
         if not self._active_dashboard_ws:
@@ -891,13 +1043,18 @@ class ChessBridge:
             logger.debug(f"_send error: {e}")
 
     async def run(self):
-                                             
         await self._ensure_engine()
 
         if self._mode == "cv":
             self.start_cv_loop()
             
         logger.info(f"Bridge orchestrator started on {self._args.host}:{self._args.port}")
+
+        # Start live background tasks for dynamic settings updates:
+        # 1. Watch settings.json for external file edits (Hot-Reloading)
+        # 2. Interactive console input loop when running in a terminal
+        watcher_task = asyncio.create_task(self._watch_settings_file())
+        console_task = asyncio.create_task(self._interactive_console_loop())
         
         try:
             async with ws_serve(
@@ -906,9 +1063,16 @@ class ChessBridge:
                 self._args.port,
                 process_request=process_http_request
             ):
-                             
+                logger.info(f"Bridge orchestrator active on ws://{self._args.host}:{self._args.port}")
+                logger.info("Ready! Settings can be reconfigured live in Web Dashboard, via terminal commands, or in settings.json.")
                 await asyncio.Future()
         finally:
+            watcher_task.cancel()
+            console_task.cancel()
+            try:
+                await asyncio.gather(watcher_task, console_task, return_exceptions=True)
+            except Exception:
+                pass
             self.stop_cv_loop()
             try:
                 await self._stop_monitoring()

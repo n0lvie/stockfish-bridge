@@ -252,6 +252,25 @@
                                     <span class="range-val" id="setting-hash-val">256 MB</span>
                                 </div>
                             </div>
+                            <div class="setting-row">
+                                <div class="setting-info">
+                                    <label>MultiPV (Analysis Lines)</label>
+                                    <p>Number of concurrent top engine move lines evaluated.</p>
+                                </div>
+                                <div class="setting-control range-control">
+                                    <input type="range" id="setting-multipv-slider" min="1" max="5" value="1">
+                                    <span class="range-val" id="setting-multipv-val">1</span>
+                                </div>
+                            </div>
+                            <div class="setting-row">
+                                <div class="setting-info">
+                                    <label>Syzygy Tablebases Path</label>
+                                    <p>Path to endgame tablebase directories (e.g. C:\Chess\Syzygy).</p>
+                                </div>
+                                <div class="setting-control">
+                                    <input type="text" id="setting-syzygy-input" placeholder="e.g. C:\Chess\Syzygy" style="background:#1e1e1e; color:#fff; border:1px solid #333; padding:6px 10px; border-radius:4px; width:100%;">
+                                </div>
+                            </div>
                         </div>
                         
                         <!-- Auto settings (displayed in auto allocator mode) -->

@@ -24,7 +24,7 @@ def main():
         "tests/test_m4_backend_challenge.py",
         "-p", "no:playwright"
     ]
-    print("\n[1/2] Running Backend & Concurrency Test Suite (144 tests)...")
+    print("\n[1/2] Running Backend & Concurrency Test Suite (147 tests)...")
     res1 = subprocess.call(backend_cmd)
 
     # 2. Browser Playwright E2E tests
@@ -42,7 +42,7 @@ def main():
 
     print("\n" + "=" * 60)
     if res1 == 0 and res2 == 0:
-        print(" [SUCCESS] All 201 tests passed with 100% success rate!")
+        print(" [SUCCESS] All 204 tests passed with 100% success rate!")
         print("=" * 60)
         sys.exit(0)
     else:

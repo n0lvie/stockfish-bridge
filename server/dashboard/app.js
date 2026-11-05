@@ -57,6 +57,9 @@ const settingThreads = document.getElementById('setting-threads-slider');
 const settingThreadsVal = document.getElementById('setting-threads-val');
 const settingHash = document.getElementById('setting-hash-slider');
 const settingHashVal = document.getElementById('setting-hash-val');
+const settingMultiPV = document.getElementById('setting-multipv-slider');
+const settingMultiPVVal = document.getElementById('setting-multipv-val');
+const settingSyzygy = document.getElementById('setting-syzygy-input');
 const settingQuality = document.getElementById('setting-quality-slider');
 const settingQualityVal = document.getElementById('setting-quality-val');
 const settingSafetyBuffer = document.getElementById('setting-safety-buffer');
@@ -95,6 +98,12 @@ settingThreads.addEventListener('input', () => {
 settingHash.addEventListener('input', () => {
     settingHashVal.textContent = `${settingHash.value} MB`;
 });
+
+if (settingMultiPV && settingMultiPVVal) {
+    settingMultiPV.addEventListener('input', () => {
+        settingMultiPVVal.textContent = settingMultiPV.value;
+    });
+}
 
 settingQuality.addEventListener('input', () => {
     settingQualityVal.textContent = `${settingQuality.value}x`;
@@ -290,6 +299,13 @@ function loadSettings(data) {
     settingQualityVal.textContent = `${settingQuality.value}x`;
     settingSafetyBuffer.value = data.safety_buffer || 2000;
     
+    if (settingMultiPV) {
+        settingMultiPV.value = data.multipv || data.multi_pv || 1;
+        if (settingMultiPVVal) settingMultiPVVal.textContent = settingMultiPV.value;
+    }
+    if (settingSyzygy) {
+        settingSyzygy.value = data.syzygy_path || data.syzygy || '';
+    }
     
     settingAllocator.dispatchEvent(new Event('change'));
 }
@@ -303,6 +319,8 @@ btnSaveSettings.addEventListener('click', () => {
         allocator: settingAllocator.value,
         threads: parseInt(settingThreads.value),
         hash: parseInt(settingHash.value),
+        multipv: settingMultiPV ? parseInt(settingMultiPV.value) : 1,
+        syzygy_path: settingSyzygy ? settingSyzygy.value.trim() : '',
         quality: parseFloat(settingQuality.value),
         safety_buffer: parseInt(settingSafetyBuffer.value)
     };
