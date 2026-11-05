@@ -1,5 +1,3 @@
-
-
 (function () {
   'use strict';
 
@@ -8,6 +6,7 @@
   let castlingRights = { K: true, Q: true, k: true, q: true };
   let enPassantSquare = '-';
   let prevBoard = null;
+  let detectedIncrementMs = 0;
 
   function resetGameState() {
     castlingRights = { K: true, Q: true, k: true, q: true };
@@ -18,6 +17,7 @@
 
   function initNewGame(gameId, color, timeControl, increment) {
     resetGameState();
+    detectedIncrementMs = increment || 0;
     Bridge.sendInit(gameId, color, timeControl, increment);
   }
 
@@ -149,7 +149,7 @@
   let observer = null;
   let clockInterval = null;
   let currentGameId = null;
-  let ourColor = null; 
+  let ourColor = null;
   let gameActive = false;
   let lastSentFen = null;
   let debounceTimer = null;
@@ -157,30 +157,49 @@
   const CLOCK_POLL_MS = 100;
   const BOARD_POLL_MS = 500;
 
-  
-
   let injectedState = null;
 
   function injectMainWorldScript() {
+    // Fallback script injection if lichess_main.js was not pre-injected (e.g. in standalone test fixtures)
     const script = document.createElement('script');
     script.textContent = `
       (function() {
+        if (window.__sfBridgeLichessMainLoaded) return;
+        window.__sfBridgeLichessMainLoaded = true;
+
         let lastState = '';
+        function findChessground() {
+          try {
+            const b = document.querySelector('cg-board');
+            if (b) {
+              if (b.parentElement && b.parentElement.chessground) return b.parentElement.chessground;
+              if (b.chessground) return b.chessground;
+              const wrap = b.closest('cg-wrap, .cg-wrap, cg-container');
+              if (wrap && wrap.chessground) return wrap.chessground;
+            }
+            if (window.lichess) {
+              if (window.lichess.round && window.lichess.round.chessground) return window.lichess.round.chessground;
+              if (window.lichess.analysis && window.lichess.analysis.chessground) return window.lichess.analysis.chessground;
+              if (window.lichess.puzzle && window.lichess.puzzle.chessground) return window.lichess.puzzle.chessground;
+            }
+          } catch (e) {}
+          return null;
+        }
+
         function poll() {
           try {
-            const cgBoard = document.querySelector('cg-board');
             let fen = null;
             let turnColor = null;
             let playingAs = null;
             let clocks = null;
             let isGameOver = false;
             let result = null;
-            
-            if (window.lichess && window.lichess.analysis) {
+
+            if (window.lichess && window.lichess.analysis && window.lichess.analysis.node) {
               fen = window.lichess.analysis.node.fen;
               turnColor = window.lichess.analysis.turnColor();
               playingAs = window.lichess.analysis.getOrientation();
-              
+
               const g = window.lichess.analysis.data && window.lichess.analysis.data.game;
               if (g && g.status && g.status.id >= 25) {
                 isGameOver = true;
@@ -188,13 +207,14 @@
                 else if (g.winner === 'black') result = '0-1';
                 else result = '1/2-1/2';
               }
-            } else if (cgBoard && cgBoard.parentElement && cgBoard.parentElement.chessground) {
-              const cg = cgBoard.parentElement.chessground;
-              fen = cg.state.fen;
-              turnColor = cg.state.turnColor;
-              playingAs = cg.state.orientation;
             }
-            
+            const cg = findChessground();
+            if (cg && cg.state) {
+              if (!fen && cg.state.fen) fen = cg.state.fen;
+              if (!turnColor && cg.state.turnColor) turnColor = cg.state.turnColor;
+              if (!playingAs && cg.state.orientation) playingAs = cg.state.orientation;
+            }
+
             if (window.lichess && window.lichess.clock) {
               const c = window.lichess.clock;
               clocks = { w: c.white !== undefined ? c.white : (c.data ? c.data.white : 0), b: c.black !== undefined ? c.black : (c.data ? c.data.black : 0) };
@@ -202,7 +222,7 @@
               const c = window.lichess.analysis.clock;
               clocks = { w: c.white !== undefined ? c.white : 0, b: c.black !== undefined ? c.black : 0 };
             }
-            
+
             if (fen) {
               const state = JSON.stringify({ fen, turnColor, playingAs, clocks, isGameOver, result });
               if (state !== lastState) {
@@ -217,35 +237,29 @@
         }
         setInterval(poll, 100);
 
-        function findChessground() {
-          try {
-            const b = document.querySelector('cg-board');
-            if (b) {
-              if (b.parentElement && b.parentElement.chessground) return b.parentElement.chessground;
-              if (b.chessground) return b.chessground;
-              const wrap = b.closest('cg-wrap, .cg-wrap, cg-container');
-              if (wrap && wrap.chessground) return wrap.chessground;
-            }
-            if (window.lichess) {
-              if (window.lichess.analysis && window.lichess.analysis.chessground) return window.lichess.analysis.chessground;
-              if (window.lichess.round && window.lichess.round.chessground) return window.lichess.round.chessground;
-              if (window.lichess.puzzle && window.lichess.puzzle.chessground) return window.lichess.puzzle.chessground;
-            }
-          } catch (e) {}
-          return null;
-        }
-
         window.addEventListener('message', function(event) {
           if (event.source !== window || !event.data || event.data.type !== 'stockfish-bridge-make-move') return;
+          const uci = event.data.uci;
           const from = event.data.from;
           const to = event.data.to;
           const promotion = event.data.promotion;
-          console.log('[StockfishBridge:MainWorld] Received move request:', from, '->', to, promotion);
+          let moveDone = false;
+
+          if (window.lichess && window.lichess.socket && typeof window.lichess.socket.send === 'function') {
+            try {
+              window.lichess.socket.send('move', { u: uci });
+              moveDone = true;
+            } catch (e) {}
+          }
 
           const cg = findChessground();
-          if (cg) {
-            console.log('[StockfishBridge:MainWorld] Chessground found, executing selectSquare...');
-            if (typeof cg.selectSquare === 'function') {
+          if (!moveDone && cg) {
+            if (typeof cg.userMove === 'function') {
+              try {
+                if (cg.userMove(from, to) !== false) moveDone = true;
+              } catch (e) {}
+            }
+            if (!moveDone && typeof cg.selectSquare === 'function') {
               cg.selectSquare(from);
               setTimeout(function() {
                 cg.selectSquare(to);
@@ -256,23 +270,25 @@
                     if (pEl) pEl.click();
                   }, 50);
                 }
-              }, 80);
-              return;
-            }
-            if (typeof cg.userMove === 'function') {
-              cg.userMove(from, to);
-              return;
-            }
-            if (typeof cg.move === 'function') {
+              }, 60);
+              moveDone = true;
+            } else if (!moveDone && typeof cg.move === 'function') {
               cg.move(from, to);
               if (cg.state && cg.state.movable && cg.state.movable.events && cg.state.movable.events.after) {
                 cg.state.movable.events.after(from, to, {});
               }
-              return;
+              moveDone = true;
             }
-          } else {
-            console.warn('[StockfishBridge:MainWorld] Chessground instance not found in main world');
           }
+
+          window.postMessage({
+            type: 'stockfish-bridge-move-result',
+            uci: uci,
+            from: from,
+            to: to,
+            promotion: promotion,
+            handled: moveDone
+          }, '*');
         });
       })();
     `;
@@ -280,13 +296,33 @@
     script.remove();
 
     window.addEventListener('message', (event) => {
-      if (event.source === window && event.data && event.data.type === 'stockfish-bridge-lichess-state') {
+      if (event.source !== window || !event.data) return;
+
+      if (event.data.type === 'stockfish-bridge-lichess-state') {
         injectedState = event.data.payload;
         if (injectedState.isGameOver && gameActive) {
           gameActive = false;
-          let res = injectedState.result || 'unknown';
+          const res = injectedState.result || 'unknown';
           Bridge.sendGameOver(res);
           console.log('[StockfishBridge] Game over detected via state:', res);
+        }
+      } else if (event.data.type === 'stockfish-bridge-move-result' && !event.data.handled) {
+        const uci = event.data.uci;
+        if (!boardEl) boardEl = document.querySelector('cg-board');
+        if (uci && uci.length >= 4 && boardEl) {
+          const from = uci.substring(0, 2);
+          const to = uci.substring(2, 4);
+          const promotion = uci.length > 4 ? uci[4] : null;
+          const boardRect = boardEl.getBoundingClientRect();
+          const squareSize = boardRect.width / 8;
+          const isFlipped = (ourColor === 'black') ||
+            (cgWrap && (cgWrap.classList.contains('orientation-black') || cgWrap.getAttribute('orientation') === 'black')) ||
+            !!document.querySelector('.orientation-black, [orientation="black"]');
+
+          simulateDragMove(from, to, boardRect, squareSize, isFlipped);
+          if (promotion) {
+            setTimeout(() => selectPromotionFast(promotion), 180);
+          }
         }
       }
     });
@@ -300,7 +336,6 @@
     waitForBoard();
   }
 
-  
   function waitForBoard() {
     boardEl = document.querySelector('cg-board');
     if (boardEl) {
@@ -322,7 +357,6 @@
     check();
   }
 
-  
   function setupMonitoring() {
     detectColor();
     gameActive = true;
@@ -340,7 +374,6 @@
       sendCurrentState();
     });
 
-    
     observer = new MutationObserver(onBoardChange);
     observer.observe(boardEl, {
       childList: true,
@@ -349,29 +382,23 @@
       attributeFilter: ['class', 'style', 'transform']
     });
 
-    
     clockInterval = setInterval(updateClocks, CLOCK_POLL_MS);
 
-    
     setTimeout(() => sendCurrentState(), 500);
 
-    
     detectGameState();
 
-    
     setInterval(() => {
       const prevColor = ourColor;
       detectColor();
       if (ourColor !== prevColor) {
         console.log('[StockfishBridge] Color changed to:', ourColor);
-        initNewGame(currentGameId, ourColor, 0, 0);
+        const freshTc = detectTimeControl();
+        initNewGame(currentGameId, ourColor, freshTc.timeControl, freshTc.increment);
       }
     }, 2000);
   }
 
-  
-
-  
   function detectColor() {
     if (injectedState && injectedState.playingAs) {
       ourColor = injectedState.playingAs;
@@ -384,7 +411,6 @@
       const isFlipped = cgWrap.classList.contains('orientation-black') || cgWrap.getAttribute('orientation') === 'black';
       ourColor = isFlipped ? 'black' : 'white';
     } else {
-      
       const mainBoard = document.querySelector('.main-board, .board-main, main .round__app, .round__app');
       if (mainBoard) {
         const orientation = mainBoard.querySelector('[class*="orientation-black"]');
@@ -395,11 +421,16 @@
     }
   }
 
-  
   function readBoardFEN() {
     if (injectedState && injectedState.fen) {
-      const fen = injectedState.fen;
-      const ourTurn = injectedState.turnColor === ourColor;
+      let fen = injectedState.fen.trim();
+      const parts = fen.split(/\s+/);
+      const turnColor = injectedState.turnColor || (parts[1] === 'b' ? 'black' : 'white');
+      const ourTurn = turnColor === ourColor;
+      if (parts.length === 1) {
+        const activeChar = turnColor === 'black' ? 'b' : 'w';
+        fen = `${parts[0]} ${activeChar} KQkq - 0 ${Math.max(1, Bridge._moveNumber || 1)}`;
+      }
       return { fen, ourTurn };
     }
 
@@ -415,72 +446,29 @@
     const boardRect = boardEl.getBoundingClientRect();
     const squareSize = boardRect.width / 8;
 
-    const isFlipped = cgWrap ? cgWrap.classList.contains('orientation-black') : false;
+    const isFlipped = cgWrap ? (cgWrap.classList.contains('orientation-black') || cgWrap.getAttribute('orientation') === 'black') : (ourColor === 'black');
 
     pieces.forEach(el => {
-      
       if (el.classList.contains('ghost') || el.classList.contains('anim') ||
           el.classList.contains('fading') || el.classList.contains('animating')) {
         return;
       }
 
-      
-      const transform = el.style.transform || '';
-      const computedTransform = window.getComputedStyle(el).transform || '';
-      let file = -1, rank = -1;
-
-      let m3d = transform.match(/translate3d\(\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\)/i) ||
-                computedTransform.match(/translate3d\(\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\)/i);
-      if (m3d) {
-        const valX = parseFloat(m3d[1]);
-        const unitX = m3d[2];
-        const valY = parseFloat(m3d[3]);
-        const unitY = m3d[4];
-        file = (unitX === '%' || (!unitX && Math.abs(valX) <= 100)) ? Math.round(valX / 12.5) : (squareSize > 0 ? Math.round(valX / squareSize) : -1);
-        rank = (unitY === '%' || (!unitY && Math.abs(valY) <= 100)) ? Math.round(valY / 12.5) : (squareSize > 0 ? Math.round(valY / squareSize) : -1);
-      } else {
-        let m2d = transform.match(/translate\(\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\)/i) ||
-                  computedTransform.match(/translate\(\s*(-?[\d.]+)(%|px|)\s*,\s*(-?[\d.]+)(%|px|)\)/i);
-        if (m2d) {
-          const valX = parseFloat(m2d[1]);
-          const unitX = m2d[2];
-          const valY = parseFloat(m2d[3]);
-          const unitY = m2d[4];
-          file = (unitX === '%' || (!unitX && Math.abs(valX) <= 100)) ? Math.round(valX / 12.5) : (squareSize > 0 ? Math.round(valX / squareSize) : -1);
-          rank = (unitY === '%' || (!unitY && Math.abs(valY) <= 100)) ? Math.round(valY / 12.5) : (squareSize > 0 ? Math.round(valY / squareSize) : -1);
-        } else {
-          let mMat = transform.match(/matrix\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\)/i) ||
-                    computedTransform.match(/matrix\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\)/i);
-          if (mMat && squareSize > 0) {
-            file = Math.round(parseFloat(mMat[5]) / squareSize);
-            rank = Math.round(parseFloat(mMat[6]) / squareSize);
-          }
-        }
-      }
-
+      let { file, rank } = getSquareFromTransform(el, squareSize);
       if (file < 0 || file > 7 || rank < 0 || rank > 7) return;
 
-      
-      
-      
-      
       if (isFlipped) {
         file = 7 - file;
-        
-        
       } else {
-        
         rank = 7 - rank;
       }
 
-      
       const piece = identifyPieceType(el);
       if (piece && file >= 0 && file < 8 && rank >= 0 && rank < 8) {
         board[rank][file] = piece;
       }
     });
 
-    
     let whiteKings = 0;
     let blackKings = 0;
     let totalPieces = 0;
@@ -493,7 +481,6 @@
         }
       }
     }
-    // Mid-animation stability check: if kings are missing or extra pieces exist, skip this tick
     if (whiteKings !== 1 || blackKings !== 1 || totalPieces > 32) {
       console.warn('[StockfishBridge] Board unstable / mid-transition, skipping FEN');
       return null;
@@ -517,7 +504,6 @@
       if (r > 0) fen += '/';
     }
 
-    
     const ourTurn = isOurTurn(board);
     const activeColor = ourTurn
       ? (ourColor === 'white' ? 'w' : 'b')
@@ -575,14 +561,12 @@
     if (castlingRights.q) castlingStr += 'q';
     if (!castlingStr) castlingStr = '-';
 
-    fen += ` ${activeColor} ${castlingStr} ${enPassantSquare} 0 1`;
+    const fullMoveNum = Math.max(1, (Bridge._moveNumber || 0) + 1);
+    fen += ` ${activeColor} ${castlingStr} ${enPassantSquare} 0 ${fullMoveNum}`;
 
-    return { fen, ourTurn };
+    return { fen, ourTurn };;
   }
 
-  
-
-  
   function readClocks() {
     let ourTimeMs = 0;
     let oppTimeMs = 0;
@@ -591,7 +575,7 @@
       const clocks = injectedState.clocks;
       let wTime = clocks.w;
       let bTime = clocks.b;
-      
+
       if (typeof wTime === 'number' && typeof bTime === 'number') {
         if (wTime > 0 && wTime < 100000) {
           wTime *= 1000;
@@ -609,7 +593,6 @@
       }
     }
 
-    // Robust DOM Fallback for Lichess clocks
     try {
       const ourClockEl = document.querySelector('.rclock-bottom, .round__side .rclock-bottom, [class*="rclock-bottom"]');
       const oppClockEl = document.querySelector('.rclock-top, .round__side .rclock-top, [class*="rclock-top"]');
@@ -639,7 +622,6 @@
       return ourColor === injectedState.turnColor;
     }
 
-    // 1. Robust Clock Running Fallback
     try {
       const bottomClock = document.querySelector('.rclock-bottom, .round__side .rclock-bottom, [class*="rclock-bottom"]');
       const topClock = document.querySelector('.rclock-top, .round__side .rclock-top, [class*="rclock-top"]');
@@ -659,19 +641,16 @@
       }
     } catch (e) {}
 
-    // 2. Robust Last-Move Square Fallback on <cg-board>
     try {
       const lastMoveEls = Array.from(document.querySelectorAll('cg-board square.last-move, .cg-wrap square.last-move, square.last-move'));
       if (lastMoveEls.length === 0) {
-        // Initial board state: White moves first
         return ourColor === 'white';
       }
 
-      // Check which last-move square has the piece that just moved
       if (board && boardEl) {
         const boardRect = boardEl.getBoundingClientRect();
         const squareSize = boardRect.width / 8;
-        const isFlipped = cgWrap ? cgWrap.classList.contains('orientation-black') : false;
+        const isFlipped = cgWrap ? (cgWrap.classList.contains('orientation-black') || cgWrap.getAttribute('orientation') === 'black') : (ourColor === 'black');
 
         for (const sq of lastMoveEls) {
           let { file, rank } = getSquareFromTransform(sq, squareSize);
@@ -692,7 +671,6 @@
       }
     } catch (e) {}
 
-    // 3. Check turn classes on container
     if (cgWrap) {
       if (cgWrap.classList.contains('turn-white')) return ourColor === 'white';
       if (cgWrap.classList.contains('turn-black')) return ourColor === 'black';
@@ -701,13 +679,11 @@
     return ourColor === 'white';
   }
 
-  
   function detectTimeControl() {
     let timeControl = 0;
     let increment = 0;
 
     try {
-      
       const setupEl = document.querySelector('.setup, .game-infos .header');
       if (setupEl) {
         const tcMatch = setupEl.textContent.match(/(\d+)\+(\d+)/);
@@ -717,30 +693,23 @@
         }
       }
 
-      
       const clockHeader = document.querySelector('.rclock .time');
       if (!timeControl && clockHeader) {
         const initTime = parseTimeString(clockHeader.textContent);
         if (initTime > 0) timeControl = initTime;
       }
-    } catch (e) {
-      
-    }
+    } catch (e) {}
 
     return { timeControl, increment };
   }
 
-  
-
-  
-  function onBoardChange(mutations) {
+  function onBoardChange() {
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       sendCurrentState();
     }, DEBOUNCE_MS);
   }
 
-  
   function sendCurrentState() {
     try {
       const result = readBoardFEN();
@@ -750,6 +719,8 @@
       lastSentFen = fen;
 
       const clocks = readClocks();
+      const fenParts = fen.split(' ');
+      const moveNum = fenParts.length >= 6 ? (parseInt(fenParts[5], 10) || Bridge._moveNumber) : Bridge._moveNumber;
 
       Bridge.sendState(
         fen,
@@ -757,29 +728,23 @@
         clocks.oppTimeMs,
         ourTurn,
         null,
-        Bridge._moveNumber,
-        0
+        moveNum,
+        detectedIncrementMs
       );
     } catch (e) {
       console.error('[StockfishBridge] Error reading lichess state:', e);
     }
   }
 
-  
   function updateClocks() {
     try {
       const clocks = readClocks();
       if (clocks.ourTimeMs > 0 || clocks.oppTimeMs > 0) {
         Bridge.sendClockUpdate(clocks.ourTimeMs, clocks.oppTimeMs);
       }
-    } catch (e) {
-      
-    }
+    } catch (e) {}
   }
 
-  
-
-  
   function simulateDragMove(fromSquare, toSquare, boardRect, squareSize, isFlipped) {
     const from = squareToFileRank(fromSquare);
     const to = squareToFileRank(toSquare);
@@ -801,7 +766,6 @@
     const pieceEl = document.elementFromPoint(fromX, fromY) || boardEl;
     if (!pieceEl) return;
 
-    // 1. mousedown / pointerdown at source piece
     pieceEl.dispatchEvent(new MouseEvent('mousedown', {
       bubbles: true, cancelable: true, view: window,
       clientX: fromX, clientY: fromY, button: 0, buttons: 1
@@ -811,7 +775,6 @@
       clientX: fromX, clientY: fromY, button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true
     }));
 
-    // 2. mousemove / pointermove to destination square (> 3px distance)
     setTimeout(() => {
       document.dispatchEvent(new MouseEvent('mousemove', {
         bubbles: true, cancelable: true, view: window,
@@ -822,7 +785,6 @@
         clientX: toX, clientY: toY, button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true
       }));
 
-      // 3. mouseup / pointerup at destination square on document
       setTimeout(() => {
         document.dispatchEvent(new MouseEvent('mouseup', {
           bubbles: true, cancelable: true, view: window,
@@ -839,7 +801,6 @@
   function makeMove(uci, from, to, promotion) {
     console.log('[StockfishBridge] Making move on lichess:', uci, from, to, promotion);
 
-    // 1. Post to MainWorld (Direct Chessground instance & socket API)
     window.postMessage({
       type: 'stockfish-bridge-make-move',
       uci: uci,
@@ -848,40 +809,7 @@
       promotion: promotion
     }, '*');
 
-    // 2. Realistic DOM drag-and-drop gesture simulation fallback
-    if (!boardEl) {
-      boardEl = document.querySelector('cg-board');
-    }
-    if (boardEl) {
-      const boardRect = boardEl.getBoundingClientRect();
-      const squareSize = boardRect.width / 8;
-      const isFlipped = (ourColor === 'black') ||
-        (cgWrap && (cgWrap.classList.contains('orientation-black') || cgWrap.getAttribute('orientation') === 'black')) ||
-        !!document.querySelector('.orientation-black, [orientation="black"]');
-
-      simulateDragMove(from, to, boardRect, squareSize, isFlipped);
-
-      if (promotion) {
-        setTimeout(() => selectPromotionFast(promotion), 180);
-      }
-    }
-
     return true;
-  }
-
-  function getSquareCenter(square, squareSize, isFlipped, boardRect) {
-    const { file, rank } = squareToFileRank(square);
-    let x, y;
-
-    if (isFlipped) {
-      x = boardRect.left + (7 - file) * squareSize + squareSize / 2;
-      y = boardRect.top + rank * squareSize + squareSize / 2;
-    } else {
-      x = boardRect.left + file * squareSize + squareSize / 2;
-      y = boardRect.top + (7 - rank) * squareSize + squareSize / 2;
-    }
-
-    return { x, y };
   }
 
   function selectPromotionFast(piece) {
@@ -935,7 +863,6 @@
   function checkGameOverDOM() {
     if (!gameActive) return;
     try {
-      // Check Lichess result elements
       const resultEl = document.querySelector(
         '.result, .cg-wrap .result, .game__meta .status, .fbt.result, .game-over-modal, .round__app .result, .game__meta .status .result'
       );
@@ -992,7 +919,6 @@
     setInterval(checkGameOverDOM, 500);
   }
 
-  
   function cleanup() {
     if (observer) {
       observer.disconnect();
@@ -1009,7 +935,6 @@
     lastSentFen = null;
   }
 
-  
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
     init();
   } else {

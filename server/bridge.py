@@ -1,7 +1,7 @@
 """
 Stockfish Chess Bridge v2.0 – WebSocket Server & Orchestrator.
 
-Combines Chrome Extension bridging, CV visual automation, 
+Combines Chrome Extension bridging, CV visual automation,
 HTTP static file serving, and adaptive engine resource allocation.
 """
 
@@ -78,9 +78,9 @@ class ChessBridge:
 
         self._safety_buffer = self._settings.get("safety_buffer", getattr(args, "safety_buffer", 2000))
         self._autoplay = self._settings.get("autoplay", True)
-        self._mode = self._settings.get("mode", "extension")                      
+        self._mode = self._settings.get("mode", "extension")
 
-        self._engine = None                                   
+        self._engine = None
         self._engine_lock = asyncio.Lock()
         self._state_lock = asyncio.Lock()
 
@@ -247,11 +247,11 @@ class ChessBridge:
                                     sf_path = "mock_stockfish"
                                 else:
                                     raise RuntimeError(f"Stockfish executable not found at '{sf_path}' or in bin/ folder.")
-                        
+
             logger.info(f"Launching Stockfish process: {sf_path}")
 
             threads, hash_mb, multi_pv, syzygy_path = self._resolve_engine_parameters()
-            
+
             engine = StockfishEngine(
                 path=sf_path,
                 threads=threads,
@@ -294,23 +294,23 @@ class ChessBridge:
         logger.info("Chrome Extension client connected.")
         self._active_extension_ws = websocket
         try:
-                                         
+
             await self._send(websocket, {
                 "type": "autoplay_changed",
                 "autoPlay": self._autoplay
             })
-            
+
             async for raw_msg in websocket:
                 if self._mode != "extension":
-                    continue                                       
-                    
+                    continue
+
                 try:
                     msg = json.loads(raw_msg)
                 except json.JSONDecodeError:
                     continue
-                    
+
                 msg_type = msg.get("type", "")
-                
+
                 if msg_type == "ping":
                     await self._send(websocket, {"type": "pong"})
                 elif msg_type in ("get_config", "get_settings"):
@@ -339,16 +339,16 @@ class ChessBridge:
             "type": "settings",
             "data": self._settings
         })
-        
+
         await self._send_cv_state_to_dashboard()
-        
+
         try:
             async for raw_msg in websocket:
                 try:
                     msg = json.loads(raw_msg)
                 except json.JSONDecodeError:
                     continue
-                    
+
                 msg_type = msg.get("type", "")
                 if msg_type == "update_settings":
                     await self._handle_settings_update(msg)
@@ -368,26 +368,51 @@ class ChessBridge:
         self._move_number = 0
         self._last_score_cp = 0
         self._last_score_type = "cp"
-        
+        self._last_dispatched_depth = 0
+
+        tc = int(msg.get("timeControl") or 0)
+        inc = int(msg.get("increment") or 0)
+        if tc > 0:
+            self._our_time_ms = tc
+            self._opp_time_ms = tc
+        if inc >= 0:
+            self._increment_ms = inc
+
         engine = await self._ensure_engine()
         await engine.new_game()
-        
+
         if ws:
             await self._send(ws, {"type": "status", "state": "ready"})
 
     async def _handle_state(self, ws, msg):
         async with self._state_lock:
             self._game_active = True
-            fen = msg.get("fen", "")
-            our_time = int(msg.get("ourTimeMs", 300000))
-            opp_time = int(msg.get("oppTimeMs", 300000))
+            fen = msg.get("fen", "").strip()
+            our_time = int(msg.get("ourTimeMs", self._our_time_ms))
+            opp_time = int(msg.get("oppTimeMs", self._opp_time_ms))
             is_our_turn = bool(msg.get("isOurTurn", False))
             move_number = int(msg.get("moveNumber", 0))
-            increment = int(msg.get("increment", 0))
+            msg_inc = int(msg.get("increment", 0))
+            increment = msg_inc if msg_inc > 0 else self._increment_ms
 
             parts = fen.split()
-            active_color = parts[1] if len(parts) > 1 else "w"
-                
+            active_color = parts[1] if len(parts) > 1 else ("w" if is_our_turn else "b")
+            if len(parts) == 1 and parts[0]:
+                fen = f"{parts[0]} {active_color} KQkq - 0 {max(1, move_number)}"
+            elif len(parts) >= 6 and move_number <= 0:
+                try:
+                    move_number = int(parts[5])
+                except ValueError:
+                    pass
+
+            if fen.startswith("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"):
+                move_number = 0
+                self._move_number = 0
+            elif move_number <= 1:
+                if parts and parts[0] != self._current_fen.split()[0]:
+                    self._move_number += 1
+                move_number = max(1, self._move_number)
+
             if not is_our_turn:
                 await self._stop_monitoring()
                 try:
@@ -420,6 +445,8 @@ class ChessBridge:
                 if engine.is_thinking:
                     await engine.stop()
 
+                self._last_dispatched_depth = 0
+
                 def on_info(info):
                     if "score" in info:
                         self._last_score_cp = info["score"]
@@ -434,7 +461,7 @@ class ChessBridge:
                     elif now - self._last_telemetry_time >= 0.25:
                         self._last_telemetry_time = now
                         asyncio.ensure_future(self._send_telemetry_to_dashboard(info))
-                    
+
                 engine.on_info = on_info
 
                 await engine.configure_adaptive_params(
@@ -445,7 +472,7 @@ class ChessBridge:
                     last_score_cp=self._last_score_cp,
                     last_score_type=self._last_score_type
                 )
-                
+
                 await engine.set_position(fen)
                 await engine.go_infinite()
             except Exception as e:
@@ -462,7 +489,7 @@ class ChessBridge:
 
             if ws:
                 await self._send(ws, {"type": "status", "state": "thinking"})
-                
+
             self._monitor_task = asyncio.ensure_future(self._monitor_loop(ws, engine))
             return True
 
@@ -481,7 +508,7 @@ class ChessBridge:
             await engine.stop()
 
     async def _handle_engine_info(self, ws, info):
-                                                       
+
         if "score" in info:
             self._last_score_cp = info["score"]
             self._last_score_type = info.get("scoreType", "cp")
@@ -515,18 +542,18 @@ class ChessBridge:
             last_score_cp=self._last_score_cp,
             last_score_type=self._last_score_type
         )
-        
+
         logger.info(f"[TimeManager] Gear shifted to: {speed_name} | Target Time: {target_time_ms} ms | Target Depth: {target_depth}")
-        
+
         try:
             while engine.is_thinking and self._game_active:
                 await asyncio.sleep(0.005)            # 5ms polling for sub-10ms response latency
-                
+
                 elapsed_ms = int((time.monotonic() - think_start) * 1000)
                 estimated_our = self._our_time_ms - elapsed_ms if self._our_time_ms > 0 else 0
-                
+
                 should_move = False
-                
+
                 # Check safety clock buffer
                 if self._strategy.should_move_now(
                     estimated_our,
@@ -542,22 +569,22 @@ class ChessBridge:
                     if engine.current_depth >= 1 or engine.best_move_so_far or estimated_our <= 25:
                         logger.info("Decision: PLAY MOVE - clock near safety buffer!")
                         should_move = True
-                    
+
                 # Check target depth limit
                 elif engine.current_depth >= target_depth:
                     logger.info(f"Decision: PLAY MOVE - Target depth reached ({engine.current_depth} >= {target_depth})")
                     should_move = True
-                    
+
                 # Check target time limit
                 elif target_time_ms is not None and elapsed_ms >= target_time_ms:
                     if engine.current_depth >= 1 or engine.best_move_so_far or estimated_our <= 25:
                         logger.info(f"Decision: PLAY MOVE - Target time limit reached ({elapsed_ms}ms >= {target_time_ms}ms)")
                         should_move = True
-                    
+
                 if should_move:
                     best_move = await engine.stop()
                     best_move = best_move or engine.best_move_so_far or engine._last_bestmove
-                    
+
                     if not best_move and engine._alive:
                         for _ in range(5):
                             await asyncio.sleep(0.005)
@@ -599,11 +626,12 @@ class ChessBridge:
                                 best_move,
                                 self._cv_classifier.board_rect,
                                 self._cv_classifier.is_flipped,
-                                True                
+                                True,
+                                self._cv_classifier.monitor_offset
                             )
                             if success:
                                 self._is_our_turn = False
-                                
+
                     return
 
             if self._game_active and not engine.is_thinking:
@@ -638,8 +666,9 @@ class ChessBridge:
                                 best_move,
                                 self._cv_classifier.board_rect,
                                 self._cv_classifier.is_flipped,
-                                True                
-                            )
+                                True,
+                                self._cv_classifier.monitor_offset
+                                )
                             if success:
                                 self._is_our_turn = False
         except asyncio.CancelledError:
@@ -661,7 +690,7 @@ class ChessBridge:
         for key in ("mode", "autoplay", "allocator", "threads", "hash", "hash_mb", "multipv", "multi_pv", "syzygy", "syzygy_path", "quality", "safety_buffer"):
             if key in msg:
                 self._settings[key] = msg[key]
-                
+
         if not skip_save:
             self.save_settings()
 
@@ -680,12 +709,13 @@ class ChessBridge:
         if "quality" in self._settings:
             engine.quality_factor = self._settings["quality"]
 
-        new_threads = msg.get("threads")
-        new_hash = msg.get("hash", msg.get("hash_mb"))
+        is_auto = (self._settings.get("allocator", "auto") == "auto")
+        new_threads = None if is_auto else msg.get("threads")
+        new_hash = None if is_auto else msg.get("hash", msg.get("hash_mb"))
         new_multipv = msg.get("multipv", msg.get("multi_pv"))
         new_syzygy = msg.get("syzygy_path", msg.get("syzygy"))
 
-        if any(x is not None for x in (new_threads, new_hash, new_multipv, new_syzygy)):
+        if any(x is not None for x in (new_threads, new_hash, new_multipv, new_syzygy)) or "allocator" in msg or "quality" in msg:
             await engine.update_tuning(
                 threads=new_threads,
                 hash_mb=new_hash,
@@ -851,9 +881,9 @@ class ChessBridge:
     async def _send_telemetry_to_dashboard(self, engine_info=None):
         if not self._active_dashboard_ws:
             return
-            
+
         import psutil
-        
+
         telemetry = {
             "our_time": self._our_time_ms,
             "opp_time": self._opp_time_ms,
@@ -862,7 +892,7 @@ class ChessBridge:
             "threads": self._engine._current_threads if self._engine else 1,
             "total_cores": detect_cpu_count()
         }
-        
+
         if engine_info:
             telemetry.update({
                 "eval": engine_info.get("score", 0),
@@ -872,7 +902,7 @@ class ChessBridge:
                 "nodes": engine_info.get("nodes", 0),
                 "pv": engine_info.get("pv", "")
             })
-            
+
         await self._send(self._active_dashboard_ws, {
             "type": "telemetry",
             "data": telemetry
@@ -881,7 +911,7 @@ class ChessBridge:
     async def _send_cv_state_to_dashboard(self):
         if not self._active_dashboard_ws:
             return
-            
+
         await self._send(self._active_dashboard_ws, {
             "type": "cv_state",
             "data": {
@@ -894,10 +924,10 @@ class ChessBridge:
 
     async def _handle_cv_command(self, msg):
         cmd = msg.get("cmd", "")
-        
+
         if cmd == "screenshot":
             logger.info("Grab screenshot requested.")
-                                                                   
+
             img, left, top = await asyncio.get_running_loop().run_in_executor(
                 None, BoardDetector.capture_screenshot
             )
@@ -909,21 +939,21 @@ class ChessBridge:
             buffer = io.BytesIO()
             img.save(buffer, format="JPEG", quality=80)
             b64_str = base64.b64encode(buffer.getvalue()).decode()
-            
+
             await self._send(self._active_dashboard_ws, {
                 "type": "screenshot",
                 "image": b64_str,
                 "width": img.width,
                 "height": img.height
             })
-            
+
         elif cmd == "set_bounds":
             x, y, w, h = msg["x"], msg["y"], msg["w"], msg["h"]
             self._cv_classifier.board_rect = (x, y, w, h)
-            self._cv_classifier.is_calibrated = False                                 
+            self._cv_classifier.is_calibrated = False
             logger.info(f"CV board bounds set manually to: {self._cv_classifier.board_rect}")
             await self._send_cv_state_to_dashboard()
-            
+
         elif cmd == "autodetect":
             img, left, top = await asyncio.get_running_loop().run_in_executor(
                 None, BoardDetector.capture_screenshot
@@ -944,22 +974,36 @@ class ChessBridge:
                     "width": img.width,
                     "height": img.height
                 })
-                
+
         elif cmd == "calibrate":
             if not self._cv_classifier.board_rect:
                 return
             img, left, top = await asyncio.get_running_loop().run_in_executor(
                 None, BoardDetector.capture_screenshot
             )
-            success = self._cv_classifier.calibrate(img, self._cv_classifier.board_rect)
+            success = self._cv_classifier.calibrate(
+                img,
+                self._cv_classifier.board_rect,
+                monitor_offset=(left, top)
+            )
             if success:
-                                                        
+                self._active_color = "w"
+                self._is_our_turn = not self._cv_classifier.is_flipped
                 fen = self._cv_classifier.get_board_fen(img, self._active_color)
                 if fen:
                     self._current_fen = fen
                 await self._handle_init(None, {})
                 await self._send_cv_state_to_dashboard()
-                
+                if self._mode == "cv" and self._is_our_turn and fen:
+                    await self._handle_state(None, {
+                        "fen": fen,
+                        "ourTimeMs": self._our_time_ms,
+                        "oppTimeMs": self._opp_time_ms,
+                        "isOurTurn": True,
+                        "moveNumber": 1,
+                        "increment": self._increment_ms
+                    })
+
         elif cmd == "test_fen":
             if not self._cv_classifier.is_calibrated:
                 return
@@ -986,13 +1030,13 @@ class ChessBridge:
     async def _cv_orchestrator_loop(self):
         try:
             while self._mode == "cv":
-                await asyncio.sleep(0.3)                       
-                
+                await asyncio.sleep(0.3)
+
                 if not self._cv_classifier.is_calibrated or not self._cv_classifier.board_rect:
                     continue
-                    
+
                 try:
-                                    
+
                     img, left, top = await asyncio.get_running_loop().run_in_executor(
                         None, BoardDetector.capture_screenshot
                     )
@@ -1025,7 +1069,7 @@ class ChessBridge:
 
                         if success is not False:
                             await self._send_cv_state_to_dashboard()
-                        
+
                 except Exception as e:
                     logger.error(f"Error in CV loop: {e}")
         except asyncio.CancelledError:
@@ -1049,7 +1093,7 @@ class ChessBridge:
 
         if self._mode == "cv":
             self.start_cv_loop()
-            
+
         logger.info(f"Bridge orchestrator started on {self._args.host}:{self._args.port}")
 
         # Start live background tasks for dynamic settings updates:
@@ -1057,11 +1101,11 @@ class ChessBridge:
         # 2. Interactive console input loop when running in a terminal
         watcher_task = asyncio.create_task(self._watch_settings_file())
         console_task = asyncio.create_task(self._interactive_console_loop())
-        
+
         try:
             async with ws_serve(
-                self.ws_handler, 
-                self._args.host, 
+                self.ws_handler,
+                self._args.host,
                 self._args.port,
                 process_request=process_http_request
             ):
@@ -1097,12 +1141,12 @@ def main(args_list=None):
     parser.add_argument("--mock", action="store_true", help="Run with mock/fake engine fallback")
     parser.add_argument("--safety-buffer", type=int, default=2000)
     parser.add_argument("--log-level", type=str, default="INFO")
-    
+
     if args_list is not None:
         args = parser.parse_args(args_list)
     else:
         args = parser.parse_args()
-    
+
     logging.basicConfig(
         level=getattr(logging, args.log_level, logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"

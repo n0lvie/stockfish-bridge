@@ -43,7 +43,7 @@ const Bridge = {
       console.warn('[StockfishBridge] Registration send failed:', e);
     }
 
-    
+
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.source === 'background') {
         this._handleServerMessage(message.data);
@@ -52,16 +52,26 @@ const Bridge = {
       return true;
     });
 
-    
+
     this._createOverlay();
+    this._connectKeepAlivePort();
   },
 
-  
+  _connectKeepAlivePort() {
+    try {
+      this._port = chrome.runtime.connect({ name: 'sf-bridge' });
+      this._port.onDisconnect.addListener(() => {
+        this._port = null;
+        setTimeout(() => this._connectKeepAlivePort(), 2000);
+      });
+    } catch (e) {}
+  },
+
   sendToServer(data) {
     try {
       chrome.runtime.sendMessage({ target: 'background', data }, (response) => {
         if (chrome.runtime.lastError) {
-          
+
           console.warn('[StockfishBridge] Send error:', chrome.runtime.lastError.message);
         }
       });
@@ -70,7 +80,7 @@ const Bridge = {
     }
   },
 
-  
+
   _handleServerMessage(data) {
     if (!data || !data.type) return;
 
@@ -146,12 +156,12 @@ const Bridge = {
     }
   },
 
-  
+
   setMakeMoveCallback(fn) {
     this._makeMoveCallback = fn;
   },
 
-  
+
   sendState(fen, ourTimeMs, oppTimeMs, isOurTurn, lastMove, moveNumber, increment) {
     const now = Date.now();
 
@@ -185,7 +195,7 @@ const Bridge = {
     });
   },
 
-  
+
   sendClockUpdate(ourTimeMs, oppTimeMs) {
     const now = Date.now();
     const last = this._lastClockSent;
@@ -203,7 +213,7 @@ const Bridge = {
     });
   },
 
-  
+
   sendInit(gameId, color, timeControl, increment) {
     this._gameId = gameId;
     this._color = color;
@@ -222,7 +232,7 @@ const Bridge = {
     });
   },
 
-  
+
   sendGameOver(result) {
     console.log('[StockfishBridge] Game over:', result);
     this.sendToServer({
@@ -232,11 +242,11 @@ const Bridge = {
     });
   },
 
-  
 
-  
+
+
   _createOverlay() {
-    
+
     if (document.getElementById('sf-bridge-overlay')) return;
 
     const overlay = document.createElement('div');
@@ -261,7 +271,7 @@ const Bridge = {
       </div>
     `;
 
-    
+
     const style = document.createElement('style');
     style.id = 'sf-bridge-styles';
     style.textContent = `
@@ -279,7 +289,7 @@ const Bridge = {
         font-size: 12px;
         color: #e0e0e0;
         z-index: 999999;
-        box-shadow: 
+        box-shadow:
           0 8px 32px rgba(0, 0, 0, 0.5),
           0 0 1px rgba(100, 200, 255, 0.3),
           inset 0 1px 0 rgba(255, 255, 255, 0.05);
@@ -291,7 +301,7 @@ const Bridge = {
       }
       #sf-bridge-overlay:hover {
         border-color: rgba(100, 200, 255, 0.25);
-        box-shadow: 
+        box-shadow:
           0 12px 40px rgba(0, 0, 0, 0.6),
           0 0 2px rgba(100, 200, 255, 0.4),
           inset 0 1px 0 rgba(255, 255, 255, 0.05);
@@ -424,7 +434,7 @@ const Bridge = {
       }
     `;
 
-    
+
     const attach = () => {
       if (document.head) document.head.appendChild(style);
       else document.documentElement.appendChild(style);
@@ -444,7 +454,7 @@ const Bridge = {
     attach();
   },
 
-  
+
   _setupDraggable(overlay) {
     const header = overlay.querySelector('.sf-header');
     let isDragging = false;
@@ -472,7 +482,7 @@ const Bridge = {
       overlay.style.transition = '';
     };
 
-    
+
     header.addEventListener('mousedown', (e) => {
       if (e.target.classList.contains('sf-minimize')) return;
       e.preventDefault();
@@ -481,7 +491,7 @@ const Bridge = {
     document.addEventListener('mousemove', (e) => onMove(e.clientX, e.clientY));
     document.addEventListener('mouseup', onEnd);
 
-    
+
     header.addEventListener('touchstart', (e) => {
       if (e.target.classList.contains('sf-minimize')) return;
       const touch = e.touches[0];
@@ -495,7 +505,7 @@ const Bridge = {
     document.addEventListener('touchend', onEnd);
   },
 
-  
+
   _setupMinimize(overlay) {
     const minimizeBtn = overlay.querySelector('.sf-minimize');
     minimizeBtn.addEventListener('click', () => {
@@ -504,7 +514,7 @@ const Bridge = {
     });
   },
 
-  
+
   _updateOverlay(info) {
     let overlay = document.getElementById('sf-bridge-overlay');
     if (!overlay) {
@@ -566,7 +576,7 @@ const Bridge = {
       }
     }
 
-    
+
     const badge = overlay.querySelector('.sf-status-badge');
     if (badge) {
       badge.textContent = 'thinking';
@@ -574,7 +584,7 @@ const Bridge = {
     }
   },
 
-  
+
   _updateStatusDisplay(state) {
     const overlay = document.getElementById('sf-bridge-overlay');
     if (!overlay) return;
@@ -589,10 +599,10 @@ const Bridge = {
     }
   },
 
-  
+
   setConnected(connected) {
     let overlay = document.getElementById('sf-bridge-overlay');
-    if (!overlay) return; 
+    if (!overlay) return;
     const dot = overlay.querySelector('.sf-dot');
     if (dot) {
       if (connected) {
@@ -610,8 +620,8 @@ const Bridge = {
 function squareToFileRank(square) {
   if (!square || square.length < 2) return { file: -1, rank: -1 };
   return {
-    file: square.charCodeAt(0) - 97, 
-    rank: parseInt(square[1]) - 1     
+    file: square.charCodeAt(0) - 97,
+    rank: parseInt(square[1]) - 1
   };
 }
 
@@ -620,10 +630,10 @@ function parseTimeString(timeStr) {
   if (!timeStr) return 0;
   timeStr = timeStr.trim();
 
-  
+
   if (timeStr === '∞' || timeStr === '-' || timeStr === '') return 0;
 
-  
+
   timeStr = timeStr.replace(/[^\d:.\-]/g, '');
   if (!timeStr) return 0;
 
@@ -632,16 +642,16 @@ function parseTimeString(timeStr) {
 
   try {
     if (parts.length === 3) {
-      
+
       totalMs = parseInt(parts[0]) * 3600000 +
                 parseInt(parts[1]) * 60000 +
                 parseFloat(parts[2]) * 1000;
     } else if (parts.length === 2) {
-      
+
       totalMs = parseInt(parts[0]) * 60000 +
                 parseFloat(parts[1]) * 1000;
     } else {
-      
+
       totalMs = parseFloat(parts[0]) * 1000;
     }
   } catch (e) {
@@ -718,7 +728,7 @@ function simulateTouchEvent(type, target, x, y) {
     });
     target.dispatchEvent(touchEvent);
   } catch (e) {
-    
+
     console.warn('[StockfishBridge] TouchEvent simulation not supported:', e.message);
   }
 }

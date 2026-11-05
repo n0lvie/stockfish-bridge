@@ -7,7 +7,7 @@ protocol using fully asynchronous I/O.
 
 import asyncio
 import logging
-from typing import Optional, Callable, Dict, Any, List
+from typing import Optional, Callable, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -16,12 +16,13 @@ try:
 except ImportError:
     from server.config import sanitize_threads, sanitize_hash, sanitize_multipv, sanitize_syzygy_path
 
+
 class StockfishEngine:
 
     def __init__(self, path="stockfish", threads=None, hash_mb=None, multi_pv=1, syzygy_path=None):
-        self.path = path             
-        self._threads = sanitize_threads(threads) if threads is not None else None                       
-        self._hash_mb = sanitize_hash(hash_mb) if hash_mb is not None else None                       
+        self.path = path
+        self._threads = sanitize_threads(threads) if threads is not None else None
+        self._hash_mb = sanitize_hash(hash_mb) if hash_mb is not None else None
         self._multi_pv = sanitize_multipv(multi_pv) if multi_pv is not None else 1
         self._syzygy_path = sanitize_syzygy_path(syzygy_path)
 
@@ -31,38 +32,40 @@ class StockfishEngine:
         self.manual_threads = self._threads or max(1, self.cpu_cores // 2)
         self.manual_hash = self._hash_mb or 256
         self.manual_depth = 0
-        self.quality_factor = 1.0                                     
-        
+        self.quality_factor = 1.0
+
         self._current_threads = None
         self._current_hash = None
 
-        self._process = None                                              
-
-        self._reader_task = None                                
+        self._process = None
+        self._reader_task = None
         self._stderr_reader_task = None
 
-        self._is_thinking = False              
+        self._is_thinking = False
         self._bestmove_event = asyncio.Event()
         self._ready_event = asyncio.Event()
         self._uciok_event = asyncio.Event()
-        self._last_bestmove = None                       
-        self._alive = False              
+        self._last_bestmove = None
+        self._alive = False
 
         self._search_generation = 0
         self._completed_searches = 0
 
-        self.current_depth = 0             
-        self.current_seldepth = 0             
-        self.current_score = 0             
-        self.current_score_type = "cp"                               
-        self.current_pv = ""             
-        self.current_nps = 0             
-        self.current_time = 0             
-        self.current_nodes = 0             
-        self.best_move_so_far = None                       
+        self._reset_search_metrics()
 
-        self.on_info = None                                                    
-        self.on_bestmove = None                                         
+        self.on_info = None
+        self.on_bestmove = None
+
+    def _reset_search_metrics(self):
+        self.current_depth = 0
+        self.current_seldepth = 0
+        self.current_score = 0
+        self.current_score_type = "cp"
+        self.current_pv = ""
+        self.current_nps = 0
+        self.current_time = 0
+        self.current_nodes = 0
+        self.best_move_so_far = None
 
     async def set_option(self, name, value):
         await self._send(f"setoption name {name} value {value}")
@@ -76,23 +79,30 @@ class StockfishEngine:
 
     async def update_tuning(self, threads=None, hash_mb=None, multi_pv=None, syzygy_path=None):
         """
-        Dynamically update engine power parameters (Threads, Hash, MultiPV, SyzygyPath)
+        Dynamically update engine parameters (Threads, Hash, MultiPV, SyzygyPath)
         with proper isready/readyok synchronization.
         """
         if self._is_thinking:
             await self.stop()
 
+        if self.is_auto_mode and threads is None and hash_mb is None:
+            threads, hash_mb = self._get_optimal_settings()
+
         if threads is not None:
             self._threads = sanitize_threads(threads)
-            self.manual_threads = self._threads
-            self._current_threads = self._threads
-            await self._send(f"setoption name Threads value {self._threads}")
+            if not self.is_auto_mode:
+                self.manual_threads = self._threads
+            if self._current_threads != self._threads:
+                self._current_threads = self._threads
+                await self._send(f"setoption name Threads value {self._threads}")
 
         if hash_mb is not None:
             self._hash_mb = sanitize_hash(hash_mb)
-            self.manual_hash = self._hash_mb
-            self._current_hash = self._hash_mb
-            await self._send(f"setoption name Hash value {self._hash_mb}")
+            if not self.is_auto_mode:
+                self.manual_hash = self._hash_mb
+            if self._current_hash != self._hash_mb:
+                self._current_hash = self._hash_mb
+                await self._send(f"setoption name Hash value {self._hash_mb}")
 
         if multi_pv is not None:
             self._multi_pv = sanitize_multipv(multi_pv)
@@ -103,7 +113,7 @@ class StockfishEngine:
             if self._syzygy_path:
                 await self._send(f"setoption name SyzygyPath value {self._syzygy_path}")
             else:
-                await self._send("setoption name SyzygyPath value <none>")
+                await self._send("setoption name SyzygyPath value <empty>")
 
         if self._alive:
             self._ready_event.clear()
@@ -115,17 +125,17 @@ class StockfishEngine:
 
     def _get_optimal_settings(self):
         import psutil
-        # 1/3 of all CPU cores
         cpu_cores = psutil.cpu_count(logical=True) or 1
-        optimal_threads = max(1, cpu_cores // 3)
+        q = max(0.1, min(3.0, float(self.quality_factor or 1.0)))
 
-        # 50% of available RAM
+        base_threads = max(1, int(round((cpu_cores / 3.0) * q)))
+        optimal_threads = max(1, min(cpu_cores, base_threads))
+
         free_ram_mb = int(psutil.virtual_memory().available / (1024 * 1024))
-        target_hash_mb = free_ram_mb // 2
+        target_hash_mb = int((free_ram_mb * 0.35) * min(2.0, q))
 
-        # Round down to nearest power of 2 (up to 8GB)
-        hash_size = 128
-        for p in [128, 256, 512, 1024, 2048, 4096, 8192]:
+        hash_size = 64
+        for p in [64, 128, 256, 512, 1024, 2048, 4096, 8192]:
             if p <= target_hash_mb:
                 hash_size = p
             else:
@@ -135,16 +145,16 @@ class StockfishEngine:
     async def configure_adaptive_params(self, our_time_ms, opp_time_ms, increment_ms, move_number, last_score_cp, last_score_type):
         if not self._alive:
             return
-        # Log status without resizing hash/threads mid-game to preserve transposition tables
-        logger.info(f"[AdaptiveEngine] Engine status: Threads={self._current_threads}, Hash={self._current_hash}MB, FEN Turn={move_number}")
+        logger.info(
+            f"[AdaptiveEngine] Engine status: Threads={self._current_threads}, "
+            f"Hash={self._current_hash}MB, Move={move_number}"
+        )
 
     @property
     def is_thinking(self):
-
         return self._is_thinking
 
     async def start(self):
-
         logger.info("Starting Stockfish subprocess: %s", self.path)
 
         self._process = await asyncio.create_subprocess_exec(
@@ -154,6 +164,8 @@ class StockfishEngine:
             stderr=asyncio.subprocess.PIPE,
         )
         self._alive = True
+        self._search_generation = 0
+        self._completed_searches = 0
 
         self._reader_task = asyncio.ensure_future(self._read_stdout())
         self._stderr_reader_task = asyncio.ensure_future(self._read_stderr())
@@ -165,13 +177,10 @@ class StockfishEngine:
         except asyncio.TimeoutError:
             raise RuntimeError("Stockfish did not respond with 'uciok' within 10 s")
 
-        # Determine Threads and Hash based on optimization rules
         if self.is_auto_mode:
             opt_threads, opt_hash = self._get_optimal_settings()
-            if self._threads is None:
-                self._threads = opt_threads
-            if self._hash_mb is None:
-                self._hash_mb = opt_hash
+            self._threads = opt_threads
+            self._hash_mb = opt_hash
             logger.info(f"[Auto-Tuning] Configured Stockfish (Auto): Threads={self._threads}, Hash={self._hash_mb}MB")
         else:
             self._threads = self._threads or self.manual_threads
@@ -185,13 +194,11 @@ class StockfishEngine:
             await self._send("setoption name Hash value %d" % self._hash_mb)
             self._current_hash = self._hash_mb
 
-        # Enforce pure calculation using NNUE, configure SyzygyPath and MultiPV
-        await self._send("setoption name Use NNUE value true")
         if self._syzygy_path:
             await self._send(f"setoption name SyzygyPath value {self._syzygy_path}")
         else:
-            await self._send("setoption name SyzygyPath value <none>")
-        await self._send("setoption name UCI_AnalyseMode value true")
+            await self._send("setoption name SyzygyPath value <empty>")
+
         await self._send("setoption name MultiPV value %d" % self._multi_pv)
 
         self._ready_event.clear()
@@ -204,7 +211,6 @@ class StockfishEngine:
         logger.info("Stockfish engine ready.")
 
     async def quit(self):
-
         if not self._alive and self._process is None:
             return
         self._alive = False
@@ -240,7 +246,8 @@ class StockfishEngine:
         logger.info("Stockfish engine shut down.")
 
     async def set_position(self, fen, moves=None):
-
+        if self._is_thinking:
+            await self.stop()
         if moves:
             cmd = "position fen %s moves %s" % (fen, moves)
         else:
@@ -248,25 +255,26 @@ class StockfishEngine:
         await self._send(cmd)
 
     async def go_infinite(self):
-
+        if self._is_thinking:
+            await self.stop()
+        self._reset_search_metrics()
         self._bestmove_event.clear()
         self._last_bestmove = None
         self._is_thinking = True
-        self.best_move_so_far = None
         self._search_generation += 1
         await self._send("go infinite")
 
     async def go_movetime(self, ms):
-
+        if self._is_thinking:
+            await self.stop()
+        self._reset_search_metrics()
         self._bestmove_event.clear()
         self._last_bestmove = None
         self._is_thinking = True
-        self.best_move_so_far = None
         self._search_generation += 1
         await self._send("go movetime %d" % ms)
 
     async def stop(self):
-
         if not self._is_thinking:
             return self._last_bestmove
 
@@ -277,17 +285,14 @@ class StockfishEngine:
         except asyncio.TimeoutError:
             logger.error("Stockfish did not respond with bestmove after stop; timeout.")
             self._is_thinking = False
-            return None
+            self._completed_searches = self._search_generation
+            return self.best_move_so_far
 
         return self._last_bestmove
 
     async def new_game(self):
-
         if self._is_thinking:
             await self.stop()
-
-        # Re-verify and apply optimal hardware configuration for new game
-        # Removed dynamic mid-session resizing to prevent reallocation crashes and preserve transposition tables.
 
         await self._send("ucinewgame")
         self._ready_event.clear()
@@ -297,19 +302,11 @@ class StockfishEngine:
         except asyncio.TimeoutError:
             raise RuntimeError("Stockfish did not become ready after ucinewgame")
 
-        self.current_depth = 0
-        self.current_score = 0
-        self.current_score_type = "cp"
-        self.current_pv = ""
-        self.current_nps = 0
-        self.current_time = 0
-        self.current_nodes = 0
-        self.best_move_so_far = None
-
+        self._reset_search_metrics()
+        self._completed_searches = self._search_generation
         logger.info("New game started.")
 
     async def _send(self, command):
-
         if self._process is None or self._process.stdin is None:
             raise RuntimeError("Stockfish process is not running")
         logger.debug(">>> %s", command)
@@ -317,7 +314,6 @@ class StockfishEngine:
         await self._process.stdin.drain()
 
     async def _read_stdout(self):
-
         assert self._process is not None
         assert self._process.stdout is not None
 
@@ -325,14 +321,11 @@ class StockfishEngine:
             while self._alive:
                 raw = await self._process.stdout.readline()
                 if not raw:
-                                         
                     logger.warning("Stockfish stdout closed unexpectedly.")
                     self._alive = False
                     self._is_thinking = False
-                                             
                     self._bestmove_event.set()
                     self._ready_event.set()
-                    # Do not set _uciok_event to avoid masking crashes during start
                     break
 
                 line = raw.decode(errors="replace").strip()
@@ -377,8 +370,8 @@ class StockfishEngine:
             logger.debug("Stderr reader error: %s", exc)
 
     def _handle_bestmove(self, line):
-
-        self._completed_searches += 1
+        if self._completed_searches < self._search_generation:
+            self._completed_searches += 1
         if self._completed_searches < self._search_generation:
             logger.debug("Ignoring bestmove from cancelled search: %s", line)
             return
@@ -401,11 +394,10 @@ class StockfishEngine:
                 logger.exception("on_bestmove callback failed")
 
     def _parse_info_line(self, line):
-
         tokens = line.split()
-        info = {}                        
+        info = {}
 
-        i = 1                           
+        i = 1
         while i < len(tokens):
             token = tokens[i]
 
@@ -427,10 +419,9 @@ class StockfishEngine:
                     score_val = int(tokens[i + 2])
                 except ValueError:
                     score_val = 0
-                info["scoreType"] = score_kind                  
+                info["scoreType"] = score_kind
                 info["score"] = score_val
                 i += 3
-                                                     
                 if i < len(tokens) and tokens[i] in ("upperbound", "lowerbound"):
                     info["scoreBound"] = tokens[i]
                     i += 1
@@ -459,12 +450,10 @@ class StockfishEngine:
                     pass
                 i += 2
             elif token == "pv":
-                                         
                 pv_moves = tokens[i + 1:]
                 info["pv"] = " ".join(pv_moves)
-                break                    
+                break
             elif token == "string":
-                                                              
                 break
             else:
                 i += 1

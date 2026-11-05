@@ -1,5 +1,3 @@
-
-
 (function () {
   'use strict';
 
@@ -8,6 +6,7 @@
   let castlingRights = { K: true, Q: true, k: true, q: true };
   let enPassantSquare = '-';
   let prevBoard = null;
+  let detectedIncrementMs = 0;
 
   function resetGameState() {
     castlingRights = { K: true, Q: true, k: true, q: true };
@@ -18,6 +17,7 @@
 
   function initNewGame(gameId, color, timeControl, increment) {
     resetGameState();
+    detectedIncrementMs = increment || 0;
     Bridge.sendInit(gameId, color, timeControl, increment);
   }
 
@@ -91,8 +91,6 @@
   const BOARD_POLL_MS = 10;
   const STATE_POLL_MS = 1000;
 
-  
-
   let injectedState = null;
 
   function injectMainWorldScript() {
@@ -107,18 +105,18 @@
               const fen = board.game.getFEN ? board.game.getFEN() : (board.game.fen || null);
               const turn = board.game.getTurn ? board.game.getTurn() : null;
               const playingAs = board.game.getPlayingAs ? board.game.getPlayingAs() : null;
-              
+
               let clocks = null;
               if (typeof board.game.getClocks === 'function') clocks = board.game.getClocks();
               else if (typeof board.game.getClock === 'function') clocks = board.game.getClock();
               else if (board.game.clocks) clocks = board.game.clocks;
-              
+
               let isGameOver = false;
               if (typeof board.game.isGameOver === 'function') isGameOver = board.game.isGameOver();
-              
+
               let result = null;
               if (typeof board.game.getResult === 'function') result = board.game.getResult();
-              
+
               let timeControl = null;
               let increment = null;
               if (typeof board.game.getTimeControl === 'function') {
@@ -128,7 +126,7 @@
                 timeControl = opts.baseTime !== undefined ? opts.baseTime : opts.timeControl;
                 increment = opts.increment;
               }
-              
+
               const state = JSON.stringify({ fen, turn, playingAs, clocks, isGameOver, result, timeControl, increment });
               if (state !== lastState) {
                 lastState = state;
@@ -168,7 +166,6 @@
     waitForBoard();
   }
 
-  
   function waitForBoard() {
     boardEl = document.querySelector('wc-chess-board, chess-board');
     if (boardEl) {
@@ -188,7 +185,6 @@
     check();
   }
 
-  
   function setupMonitoring() {
     detectColor();
     gameActive = true;
@@ -196,7 +192,6 @@
     const urlMatch = window.location.pathname.match(/\/game\/live\/(\d+)|\/game\/daily\/(\d+)/);
     currentGameId = urlMatch ? (urlMatch[1] || urlMatch[2]) : 'live-' + Date.now();
 
-    // Immediately dispatch game init without waiting for asynchronous callback
     const tc = detectTimeControl();
     initNewGame(currentGameId, ourColor, tc.timeControl, tc.increment);
 
@@ -224,33 +219,37 @@
           attributeFilter: ['class', 'style']
         });
       }
-    } catch (e) {
-      
-    }
+    } catch (e) {}
 
     updateClocks();
     clockInterval = setInterval(updateClocks, CLOCK_POLL_MS);
 
     pollTimer = setInterval(() => sendCurrentState(false), STATE_POLL_MS);
 
-    
     detectGameState();
 
-    
     setInterval(() => {
       const prevColor = ourColor;
       detectColor();
       if (ourColor !== prevColor) {
         console.log('[StockfishBridge] Color changed to:', ourColor);
-        initNewGame(currentGameId, ourColor, 0, 0);
+        const freshTc = detectTimeControl();
+        initNewGame(currentGameId, ourColor, freshTc.timeControl, freshTc.increment);
       }
     }, 2000);
   }
 
-  
-
-  
   function detectColor() {
+    if (injectedState && injectedState.playingAs) {
+      if (injectedState.playingAs === 1 || injectedState.playingAs === 'w' || injectedState.playingAs === 'white') {
+        ourColor = 'white';
+        return;
+      }
+      if (injectedState.playingAs === 2 || injectedState.playingAs === 'b' || injectedState.playingAs === 'black') {
+        ourColor = 'black';
+        return;
+      }
+    }
     if (!boardEl) return;
     const orientation = boardEl.getAttribute('orientation');
     if (orientation) {
@@ -262,7 +261,6 @@
     }
   }
 
-  
   function readBoardFEN() {
     if (injectedState && injectedState.fen) {
       const fen = injectedState.fen;
@@ -273,7 +271,6 @@
 
     if (!boardEl) return null;
 
-    
     let pieces = boardEl.querySelectorAll('[class*="piece"]');
     if (pieces.length === 0 && boardEl.shadowRoot) {
       pieces = boardEl.shadowRoot.querySelectorAll('[class*="piece"]');
@@ -298,7 +295,7 @@
       for (const cls of classes) {
         const sqMatch = cls.match(/^square-(\d)(\d)$/);
         if (sqMatch) {
-          file = parseInt(sqMatch[1]) - 1; 
+          file = parseInt(sqMatch[1]) - 1;
           rank = parseInt(sqMatch[2]) - 1;
           break;
         }
@@ -329,7 +326,6 @@
         }
       }
     }
-    // Mid-animation stability check: if kings are missing or extra pieces exist, skip this tick
     if (whiteKings !== 1 || blackKings !== 1 || totalPieces > 32) {
       console.warn('[StockfishBridge] Chess.com board unstable / mid-animation, skipping FEN');
       return null;
@@ -410,14 +406,12 @@
     if (castlingRights.q) castlingStr += 'q';
     if (!castlingStr) castlingStr = '-';
 
-    fen += ` ${activeColor} ${castlingStr} ${enPassantSquare} 0 1`;
+    const fullMoveNum = Math.max(1, (Bridge._moveNumber || 0) + 1);
+    fen += ` ${activeColor} ${castlingStr} ${enPassantSquare} 0 ${fullMoveNum}`;
 
     return { fen, ourTurn };
   }
 
-  
-
-  
   function readClocks() {
     let ourTimeMs = 0;
     let oppTimeMs = 0;
@@ -426,10 +420,10 @@
       const clocks = injectedState.clocks;
       let wTime = clocks.w !== undefined ? clocks.w : clocks.white !== undefined ? clocks.white : 0;
       let bTime = clocks.b !== undefined ? clocks.b : clocks.black !== undefined ? clocks.black : 0;
-      
+
       if (typeof wTime === 'object' && wTime !== null) wTime = wTime.time !== undefined ? wTime.time : wTime.tenthOfSeconds !== undefined ? wTime.tenthOfSeconds * 100 : wTime.timeMs !== undefined ? wTime.timeMs : 0;
       if (typeof bTime === 'object' && bTime !== null) bTime = bTime.time !== undefined ? bTime.time : bTime.tenthOfSeconds !== undefined ? bTime.tenthOfSeconds * 100 : bTime.timeMs !== undefined ? bTime.timeMs : 0;
-      
+
       if (wTime > 0 && wTime < 100000 && typeof clocks.w === 'number') {
         wTime *= 100;
         bTime *= 100;
@@ -445,7 +439,6 @@
       if (ourTimeMs > 0 || oppTimeMs > 0) return { ourTimeMs, oppTimeMs };
     }
 
-    // --- DOM FALLBACK ---
     try {
       const bottomClock = document.querySelector('.clock-bottom, [data-cy="clock-bottom"]');
       const topClock = document.querySelector('.clock-top, [data-cy="clock-top"]');
@@ -476,7 +469,6 @@
     return { ourTimeMs, oppTimeMs };
   }
 
-  
   function findClockText(container) {
     const timeEl = container.querySelector(
       '.clock-time-monospace, [class*="clock-time"], .time'
@@ -484,14 +476,12 @@
     return timeEl ? timeEl.textContent : container.textContent;
   }
 
-  
   function isOurTurn(board) {
     if (injectedState && injectedState.turn) {
       const turnColor = injectedState.turn === 'w' || injectedState.turn === 'white' ? 'white' : 'black';
       return ourColor === turnColor;
     }
 
-    // --- DOM FALLBACK ---
     try {
       const bottomClock = document.querySelector('.clock-bottom, [data-cy="clock-bottom"]');
       const topClock = document.querySelector('.clock-top, [data-cy="clock-top"]');
@@ -500,7 +490,7 @@
         if (bottomClock.classList.contains('clock-player-turn') || bottomClock.hasAttribute('data-active')) return true;
         if (topClock.classList.contains('clock-player-turn') || topClock.hasAttribute('data-active')) return false;
       }
-      
+
       const boardRect = boardEl ? boardEl.getBoundingClientRect() : { top: 0, bottom: 2000 };
       const containers = document.querySelectorAll('.clock-component, [class*="clock-container"]');
       const visibleContainers = Array.from(containers).filter(el => {
@@ -514,14 +504,13 @@
         if (sorted[sorted.length - 1].classList.contains('clock-player-turn') || sorted[sorted.length - 1].querySelector('.clock-player-turn')) return false;
       }
 
-      // --- HIGHLIGHT FALLBACK (for untimed/bot games) ---
       if (boardEl && board) {
         let highlights = Array.from(boardEl.querySelectorAll('.highlight'));
         if (highlights.length === 0 && boardEl.shadowRoot) {
           highlights = Array.from(boardEl.shadowRoot.querySelectorAll('.highlight'));
         }
         if (highlights.length > 0) {
-          let opponentColor = ourColor === 'white' ? 'black' : 'white';
+          const opponentColor = ourColor === 'white' ? 'black' : 'white';
           for (const hl of highlights) {
             const hClasses = getElementClassString(hl);
             const sqMatch = hClasses.match(/square-(\d)(\d)/);
@@ -538,7 +527,6 @@
             }
           }
         } else {
-          // If no highlights at all, it's the start of the game. White starts.
           return ourColor === 'white';
         }
       }
@@ -548,13 +536,11 @@
     return false;
   }
 
-  
   function detectTimeControl() {
     let timeControl = 0;
     let increment = 0;
 
     try {
-      
       const tcEl = document.querySelector(
         '[class*="time-control"], [class*="game-info-time"]'
       );
@@ -571,24 +557,18 @@
           }
         }
       }
-    } catch (e) {
-      
-    }
+    } catch (e) {}
 
     return { timeControl, increment };
   }
 
-  
-
-  
-  function onBoardChange(mutations) {
+  function onBoardChange() {
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       sendCurrentState();
     }, DEBOUNCE_MS);
   }
 
-  
   function sendCurrentState(force) {
     try {
       const result = readBoardFEN();
@@ -601,6 +581,11 @@
       lastSentTurn = ourTurn;
 
       const clocks = readClocks();
+      const fenParts = fen.split(' ');
+      const moveNum = fenParts.length >= 6 ? (parseInt(fenParts[5], 10) || 0) : null;
+      const incMs = (injectedState && injectedState.increment)
+        ? (injectedState.increment < 100 ? injectedState.increment * 1000 : injectedState.increment)
+        : (detectedIncrementMs || detectTimeControl().increment || 0);
 
       Bridge.sendState(
         fen,
@@ -608,29 +593,23 @@
         clocks.oppTimeMs,
         ourTurn,
         null,
-        null,
-        0
+        moveNum,
+        incMs
       );
     } catch (e) {
       console.error('[StockfishBridge] Error reading chess.com state:', e);
     }
   }
 
-  
   function updateClocks() {
     try {
       const clocks = readClocks();
       if (clocks.ourTimeMs > 0 || clocks.oppTimeMs > 0) {
         Bridge.sendClockUpdate(clocks.ourTimeMs, clocks.oppTimeMs);
       }
-    } catch (e) {
-      
-    }
+    } catch (e) {}
   }
 
-  
-
-  
   function makeMove(uci, from, to, promotion) {
     console.log('[StockfishBridge] Making move on chess.com:', uci);
 
@@ -649,7 +628,7 @@
     const targetElement = document.elementFromPoint(fromCoords.x, fromCoords.y) || boardEl;
     const toTarget = document.elementFromPoint(toCoords.x, toCoords.y) || boardEl;
 
-    // 1. Immediate crisp Pointer & Mouse drag dispatch (sub-10ms overhead)
+    // 1. Crisp Pointer & Mouse drag dispatch
     simulatePointerEvent('pointerdown', targetElement, fromCoords.x, fromCoords.y);
     simulateMouseEvent('mousedown', targetElement, fromCoords.x, fromCoords.y);
     simulatePointerEvent('pointermove', boardEl, toCoords.x, toCoords.y);
@@ -657,11 +636,7 @@
     simulatePointerEvent('pointerup', toTarget, toCoords.x, toCoords.y);
     simulateMouseEvent('mouseup', toTarget, toCoords.x, toCoords.y);
 
-    // 2. Immediate Click-to-Move fallback
-    simulateClick(targetElement, fromCoords.x, fromCoords.y);
-    simulateClick(toTarget, toCoords.x, toCoords.y);
-
-    // 3. Fast promotion selection (no artificial 250ms sleep)
+    // 2. Fast promotion selection
     if (promotion) {
       selectPromotionFast(promotion);
     }
@@ -734,9 +709,6 @@
     trySelect();
   }
 
-  
-
-  
   function detectGameState() {
     const checkGameOver = () => {
       try {
@@ -780,7 +752,6 @@
     });
   }
 
-  
   function cleanup() {
     if (observer) { observer.disconnect(); observer = null; }
     if (clockInterval) { clearInterval(clockInterval); clockInterval = null; }
@@ -790,7 +761,6 @@
     lastSentTurn = null;
   }
 
-  
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
     init();
   } else {
