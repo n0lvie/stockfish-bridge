@@ -780,44 +780,66 @@
   
 
   
-  function clickBoardSquare(square, boardRect, squareSize, isFlipped) {
-    const { file, rank } = squareToFileRank(square);
-    const x = isFlipped
-      ? boardRect.left + (7 - file + 0.5) * squareSize
-      : boardRect.left + (file + 0.5) * squareSize;
-    const y = isFlipped
-      ? boardRect.top + (rank + 0.5) * squareSize
-      : boardRect.top + (7 - rank + 0.5) * squareSize;
+  function simulateDragMove(fromSquare, toSquare, boardRect, squareSize, isFlipped) {
+    const from = squareToFileRank(fromSquare);
+    const to = squareToFileRank(toSquare);
 
-    const target = document.elementFromPoint(x, y) || boardEl;
-    if (!target) return;
+    const fromX = isFlipped
+      ? boardRect.left + (7 - from.file + 0.5) * squareSize
+      : boardRect.left + (from.file + 0.5) * squareSize;
+    const fromY = isFlipped
+      ? boardRect.top + (from.rank + 0.5) * squareSize
+      : boardRect.top + (7 - from.rank + 0.5) * squareSize;
 
-    target.dispatchEvent(new PointerEvent('pointerdown', {
-      bubbles: true, cancelable: true, composed: true, view: window,
-      clientX: x, clientY: y, button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true
+    const toX = isFlipped
+      ? boardRect.left + (7 - to.file + 0.5) * squareSize
+      : boardRect.left + (to.file + 0.5) * squareSize;
+    const toY = isFlipped
+      ? boardRect.top + (to.rank + 0.5) * squareSize
+      : boardRect.top + (7 - to.rank + 0.5) * squareSize;
+
+    const pieceEl = document.elementFromPoint(fromX, fromY) || boardEl;
+    if (!pieceEl) return;
+
+    // 1. mousedown / pointerdown at source piece
+    pieceEl.dispatchEvent(new MouseEvent('mousedown', {
+      bubbles: true, cancelable: true, view: window,
+      clientX: fromX, clientY: fromY, button: 0, buttons: 1
     }));
-    target.dispatchEvent(new PointerEvent('pointerup', {
+    pieceEl.dispatchEvent(new PointerEvent('pointerdown', {
       bubbles: true, cancelable: true, composed: true, view: window,
-      clientX: x, clientY: y, button: 0, buttons: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+      clientX: fromX, clientY: fromY, button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true
     }));
-    target.dispatchEvent(new MouseEvent('mousedown', {
-      bubbles: true, cancelable: true, composed: true, view: window,
-      clientX: x, clientY: y, button: 0, buttons: 1
-    }));
-    target.dispatchEvent(new MouseEvent('mouseup', {
-      bubbles: true, cancelable: true, composed: true, view: window,
-      clientX: x, clientY: y, button: 0, buttons: 0
-    }));
-    target.dispatchEvent(new MouseEvent('click', {
-      bubbles: true, cancelable: true, composed: true, view: window,
-      clientX: x, clientY: y, button: 0, buttons: 0
-    }));
+
+    // 2. mousemove / pointermove to destination square (> 3px distance)
+    setTimeout(() => {
+      document.dispatchEvent(new MouseEvent('mousemove', {
+        bubbles: true, cancelable: true, view: window,
+        clientX: toX, clientY: toY, button: 0, buttons: 1
+      }));
+      document.dispatchEvent(new PointerEvent('pointermove', {
+        bubbles: true, cancelable: true, composed: true, view: window,
+        clientX: toX, clientY: toY, button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true
+      }));
+
+      // 3. mouseup / pointerup at destination square on document
+      setTimeout(() => {
+        document.dispatchEvent(new MouseEvent('mouseup', {
+          bubbles: true, cancelable: true, view: window,
+          clientX: toX, clientY: toY, button: 0, buttons: 0
+        }));
+        document.dispatchEvent(new PointerEvent('pointerup', {
+          bubbles: true, cancelable: true, composed: true, view: window,
+          clientX: toX, clientY: toY, button: 0, buttons: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+        }));
+      }, 70);
+    }, 70);
   }
 
   function makeMove(uci, from, to, promotion) {
     console.log('[StockfishBridge] Making move on lichess:', uci, from, to, promotion);
 
-    // 1. Post to MainWorld (Direct Chessground instance API)
+    // 1. Post to MainWorld (Direct Chessground instance & socket API)
     window.postMessage({
       type: 'stockfish-bridge-make-move',
       uci: uci,
@@ -826,24 +848,22 @@
       promotion: promotion
     }, '*');
 
-    // 2. Sequential DOM click-to-move fallback (120ms separation)
+    // 2. Realistic DOM drag-and-drop gesture simulation fallback
     if (!boardEl) {
       boardEl = document.querySelector('cg-board');
     }
     if (boardEl) {
       const boardRect = boardEl.getBoundingClientRect();
       const squareSize = boardRect.width / 8;
-      const isFlipped = cgWrap ? (cgWrap.classList.contains('orientation-black') || cgWrap.getAttribute('orientation') === 'black') : false;
+      const isFlipped = (ourColor === 'black') ||
+        (cgWrap && (cgWrap.classList.contains('orientation-black') || cgWrap.getAttribute('orientation') === 'black')) ||
+        !!document.querySelector('.orientation-black, [orientation="black"]');
 
-      setTimeout(() => {
-        clickBoardSquare(from, boardRect, squareSize, isFlipped);
-        setTimeout(() => {
-          clickBoardSquare(to, boardRect, squareSize, isFlipped);
-          if (promotion) {
-            selectPromotionFast(promotion);
-          }
-        }, 120);
-      }, 50);
+      simulateDragMove(from, to, boardRect, squareSize, isFlipped);
+
+      if (promotion) {
+        setTimeout(() => selectPromotionFast(promotion), 180);
+      }
     }
 
     return true;
