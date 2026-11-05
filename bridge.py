@@ -105,9 +105,6 @@ class ConfigManager:
                 "Threads": max(1, min(8, cores)),
                 "Hash": 512,
                 "Ponder": True,
-                "Skill Level": 20,
-                "UCI_LimitStrength": False,
-                "UCI_Elo": 3190,
                 "UCI_Chess960": False,
                 "UCI_Variant": "chess",
                 "Slow Mover": 100,
@@ -127,10 +124,13 @@ class ConfigManager:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
             merged = dict(defaults)
+            banned_skill_keys = {"skill level", "uci_limitstrength", "uci_elo", "contempt"}
             for k, v in data.items():
                 if k == "stockfish_uci" and isinstance(v, dict):
                     uci_merged = dict(defaults["stockfish_uci"])
-                    uci_merged.update(v)
+                    for uk, uv in v.items():
+                        if uk.lower() not in banned_skill_keys:
+                            uci_merged[uk] = uv
                     merged["stockfish_uci"] = uci_merged
                 else:
                     merged[k] = v
@@ -333,7 +333,7 @@ class UCIEngine:
         self.alive = False
         self.supported_options = {}
         self.uci_config = dict(uci_dict)
-        self.dynamic_overhead = 30
+        self.dynamic_overhead = 35
         self.active_multipv = 2
 
         self.is_thinking = False
@@ -350,9 +350,9 @@ class UCIEngine:
         self._uciok = asyncio.Event()
         self._readyok = asyncio.Event()
         self._bestmove_ev = asyncio.Event()
+        self._cmd_lock = asyncio.Lock()
         self._reader_task = None
-        self._search_id = 0
-        self._completed_id = 0
+        self._ignore_next_bestmove = False
         self.on_bestmove = None
         self.on_info = None
 
@@ -372,8 +372,7 @@ class UCIEngine:
 
         self.alive = True
         self.supported_options.clear()
-        self._search_id = 0
-        self._completed_id = 0
+        self._ignore_next_bestmove = False
         self._reader_task = asyncio.create_task(self._stdout_loop())
 
         self._uciok.clear()
@@ -402,6 +401,7 @@ class UCIEngine:
             self._reader_task.cancel()
         self.is_thinking = False
         self.is_pondering = False
+        self.ponder_auxiliary = False
 
     async def _send(self, line):
         if self.proc and self.proc.stdin and self.alive:
@@ -435,13 +435,27 @@ class UCIEngine:
         await self._send(f"setoption name {real_name} value {val_str}")
         return True
 
+    async def _enforce_maximum_strength(self):
+        if self.find_opt("UCI_LimitStrength"):
+            await self.set_uci_option("UCI_LimitStrength", False)
+        skill_key = self.find_opt("Skill Level")
+        if skill_key:
+            meta = self.supported_options[skill_key].get("meta", "")
+            m_max = re.search(r"max\s+(\d+)", meta)
+            max_skill = int(m_max.group(1)) if m_max else 20
+            await self.set_uci_option(skill_key, max_skill)
+        if self.find_opt("Use NNUE"):
+            await self.set_uci_option("Use NNUE", True)
+
     async def apply_config_options(self):
         if not self.alive:
             return
-        if self.is_thinking:
-            await self.stop()
+        await self.abort_search()
+        banned = {"skill level", "uci_limitstrength", "uci_elo", "contempt"}
         for k, v in self.uci_config.items():
-            await self.set_uci_option(k, v)
+            if k.lower() not in banned:
+                await self.set_uci_option(k, v)
+        await self._enforce_maximum_strength()
         await self.set_uci_option("Move Overhead", self.dynamic_overhead)
         await self.set_uci_option("MultiPV", self.active_multipv)
         await self.sync_ready()
@@ -456,9 +470,9 @@ class UCIEngine:
     async def new_game(self):
         if not self.alive:
             return
-        if self.is_thinking:
-            await self.stop()
+        await self.abort_search()
         await self._send("ucinewgame")
+        await self._enforce_maximum_strength()
         await self.sync_ready()
         self.last_info.clear()
         self.multipv_lines.clear()
@@ -498,11 +512,14 @@ class UCIEngine:
             self.alive = False
             self.is_thinking = False
             self.is_pondering = False
+            self.ponder_auxiliary = False
             self._uciok.set()
             self._readyok.set()
             self._bestmove_ev.set()
 
     def _parse_info(self, line):
+        if self._ignore_next_bestmove:
+            return
         tokens = line.split()
         info = {}
         i = 1
@@ -543,21 +560,22 @@ class UCIEngine:
                 self.on_info(info)
 
     def _parse_bestmove(self, line):
-        if self._completed_id < self._search_id:
-            self._completed_id += 1
-        if self._completed_id < self._search_id:
-            return
         parts = line.split()
-        bm = parts[1] if len(parts) > 1 else None
-        pm = parts[3] if len(parts) > 3 and parts[2] == "ponder" else None
+        bm = parts[1] if len(parts) >= 2 else None
+        pm = parts[3] if len(parts) >= 4 and parts[2] == "ponder" else None
+
+        was_ignored = self._ignore_next_bestmove
         was_ponder = self.is_pondering or self.ponder_auxiliary
+
+        self._ignore_next_bestmove = False
         self.best_move = bm
         self.ponder_reply = pm
         self.is_thinking = False
         self.is_pondering = False
         self.ponder_auxiliary = False
         self._bestmove_ev.set()
-        if not was_ponder and self.on_bestmove and bm and bm not in ("(none)", "none", "0000"):
+
+        if not was_ignored and not was_ponder and self.on_bestmove and bm and bm not in ("(none)", "none", "0000"):
             self.on_bestmove(bm, pm)
 
     async def set_position(self, start_fen, move_list):
@@ -569,56 +587,68 @@ class UCIEngine:
             pos_str += " moves " + " ".join(move_list)
         await self._send(pos_str)
 
-    async def start_search(self, start_fen, move_list, go_cmd, ponder=False, ponder_move=None, aux_ponder=False, multipv=2):
-        if not self.alive:
-            return
-        if self.is_thinking:
-            await self.stop()
-        if self.active_multipv != multipv:
-            self.active_multipv = multipv
-            await self.set_uci_option("MultiPV", multipv)
-        await self.set_uci_option("Move Overhead", self.dynamic_overhead)
-        await self.sync_ready()
-
-        self.last_info.clear()
-        self.multipv_lines.clear()
-        self.best_so_far = None
-        self.best_move = None
-        self.ponder_reply = None
-        self._bestmove_ev.clear()
-        self.is_thinking = True
-        self.is_pondering = ponder
-        self.ponder_auxiliary = aux_ponder
-        self.ponder_move_uci = ponder_move if ponder else None
-        self.search_start_ts = time.monotonic()
-        self._search_id += 1
-        await self.set_position(start_fen, move_list)
-        await self._send(go_cmd)
-
-    async def ponderhit(self):
-        if self.is_thinking and self.is_pondering:
+    async def abort_search(self):
+        async with self._cmd_lock:
+            if not self.is_thinking:
+                return
+            self._ignore_next_bestmove = True
             self.is_pondering = False
             self.ponder_auxiliary = False
             self.ponder_move_uci = None
-            self.search_start_ts = time.monotonic()
-            await self._send("ponderhit")
-            return True
-        return False
+            await self._send("stop")
+            try:
+                await asyncio.wait_for(self._bestmove_ev.wait(), timeout=3.0)
+            except asyncio.TimeoutError:
+                self.is_thinking = False
+                self._ignore_next_bestmove = False
 
-    async def stop(self):
-        if not self.is_thinking:
-            return self.best_move
-        self.is_pondering = False
-        self.ponder_auxiliary = False
-        self.ponder_move_uci = None
-        await self._send("stop")
-        try:
-            await asyncio.wait_for(self._bestmove_ev.wait(), timeout=4.0)
-        except asyncio.TimeoutError:
-            self.is_thinking = False
-            self._completed_id = self._search_id
-            return self.best_so_far
-        return self.best_move
+    async def finish_search(self):
+        async with self._cmd_lock:
+            if not self.is_thinking or self.is_pondering or self.ponder_auxiliary:
+                return
+            self._ignore_next_bestmove = False
+            await self._send("stop")
+            try:
+                await asyncio.wait_for(self._bestmove_ev.wait(), timeout=3.0)
+            except asyncio.TimeoutError:
+                self.is_thinking = False
+
+    async def start_search(self, start_fen, move_list, go_cmd, ponder=False, ponder_move=None, aux_ponder=False, multipv=2):
+        if not self.alive:
+            return
+        await self.abort_search()
+        async with self._cmd_lock:
+            if self.active_multipv != multipv:
+                self.active_multipv = multipv
+                await self.set_uci_option("MultiPV", multipv)
+            await self.set_uci_option("Move Overhead", self.dynamic_overhead)
+            await self.sync_ready()
+
+            self.last_info.clear()
+            self.multipv_lines.clear()
+            self.best_so_far = None
+            self.best_move = None
+            self.ponder_reply = None
+            self._ignore_next_bestmove = False
+            self._bestmove_ev.clear()
+            self.is_thinking = True
+            self.is_pondering = ponder
+            self.ponder_auxiliary = aux_ponder
+            self.ponder_move_uci = ponder_move if ponder else None
+            self.search_start_ts = time.monotonic()
+            await self.set_position(start_fen, move_list)
+            await self._send(go_cmd)
+
+    async def ponderhit(self):
+        async with self._cmd_lock:
+            if self.is_thinking and self.is_pondering and not self._ignore_next_bestmove:
+                self.is_pondering = False
+                self.ponder_auxiliary = False
+                self.ponder_move_uci = None
+                self.search_start_ts = time.monotonic()
+                await self._send("ponderhit")
+                return True
+        return False
 
 
 class MouseController:
@@ -1087,8 +1117,9 @@ class BridgeOrchestrator:
         self.board = chess.Board()
         self.start_fen = chess.STARTING_FEN
         self.move_history = []
-        self.synced_once = False
-        self.ext_has_board = False
+        self._pending_move_uci = None
+        self._pending_ponder_uci = None
+        self._pending_move_ts = 0.0
 
         self.wtime_ms = 180000
         self.btime_ms = 180000
@@ -1100,7 +1131,7 @@ class BridgeOrchestrator:
         self.limit_depth = 0
         self._apply_dict_to_runtime(self.cfg)
 
-        self._latency_ema_ms = 20.0
+        self._latency_ema_ms = 25.0
         self._last_hud_ts = 0.0
         self.ext_clients = set()
         self.loop = None
@@ -1125,7 +1156,7 @@ class BridgeOrchestrator:
         if sample_ms <= 0:
             return
         self._latency_ema_ms = 0.75 * self._latency_ema_ms + 0.25 * float(sample_ms)
-        dyn_ovh = int(self._latency_ema_ms * 1.5 + 12)
+        dyn_ovh = int(self._latency_ema_ms * 1.6 + 15)
         if self.loop:
             asyncio.run_coroutine_threadsafe(self.engine.update_dynamic_overhead(dyn_ovh), self.loop)
 
@@ -1153,7 +1184,7 @@ class BridgeOrchestrator:
         else:
             self.btime_ms = max(50, self.btime_ms - dt_ms)
 
-        if self.mode == "cv" or not self.ext_has_board:
+        if self.mode == "cv" or not self.ext_clients:
             us_ocr = self.cv.read_ocr_clock_ms("clock_us")
             opp_ocr = self.cv.read_ocr_clock_ms("clock_opp")
             if us_ocr is not None:
@@ -1193,11 +1224,11 @@ class BridgeOrchestrator:
         if self.limit_depth > 0 and not self.engine.is_pondering and not self.engine.ponder_auxiliary:
             if info.get("depth", 0) >= self.limit_depth and self.engine.is_thinking:
                 if self.loop:
-                    asyncio.run_coroutine_threadsafe(self.engine.stop(), self.loop)
+                    asyncio.run_coroutine_threadsafe(self.engine.finish_search(), self.loop)
         if self.limit_time_ms > 0 and not self.engine.is_pondering and not self.engine.ponder_auxiliary:
             if info.get("time", 0) >= self.limit_time_ms and self.engine.is_thinking:
                 if self.loop:
-                    asyncio.run_coroutine_threadsafe(self.engine.stop(), self.loop)
+                    asyncio.run_coroutine_threadsafe(self.engine.finish_search(), self.loop)
 
         if now - self._last_hud_ts < 0.08:
             return
@@ -1246,6 +1277,24 @@ class BridgeOrchestrator:
         if self.loop:
             asyncio.run_coroutine_threadsafe(self._dispatch_bestmove(best_uci, ponder_uci), self.loop)
 
+    async def _send_move_to_ext(self, best_uci):
+        payload = json.dumps({
+            "type": "move",
+            "uci": best_uci,
+            "from": best_uci[:2],
+            "to": best_uci[2:4],
+            "promotion": best_uci[4] if len(best_uci) > 4 else None,
+            "sentAt": time.time() * 1000,
+        })
+        sent = False
+        for ws in list(self.ext_clients):
+            try:
+                await ws.send(payload)
+                sent = True
+            except Exception:
+                self.ext_clients.discard(ws)
+        return sent
+
     async def _dispatch_bestmove(self, best_uci, ponder_uci):
         async with self._lock:
             if self.board.turn != self.our_color:
@@ -1259,8 +1308,8 @@ class BridgeOrchestrator:
 
             inf1 = self.engine.multipv_lines.get(1, self.engine.last_info)
             ev_s = self._format_score(inf1, self.board.turn)
-            depth = inf1.get("depth", 0)
-            t_ms = inf1.get("time", int((time.monotonic() - self.engine.search_start_ts) * 1000))
+            depth = max(1, inf1.get("depth", 1))
+            t_ms = max(1, inf1.get("time", int((time.monotonic() - self.engine.search_start_ts) * 1000)))
             if not ponder_uci:
                 pv_l = inf1.get("pv_list", [])
                 if len(pv_l) >= 2:
@@ -1271,6 +1320,8 @@ class BridgeOrchestrator:
                 f"\r\033[K\033[92m[BEST|{mode_badge}] {best_uci} | eval: {ev_s} | depth: {depth} | time: {t_ms}ms\033[0m\n"
             )
             sys.stdout.flush()
+
+            self._pending_ponder_uci = ponder_uci
 
             if not self.autoplay:
                 if self.ponder_enabled and ponder_uci:
@@ -1292,25 +1343,13 @@ class BridgeOrchestrator:
                         pass
                 return
 
-            use_ext = (self.mode in ("auto", "ext")) and len(self.ext_clients) > 0 and self.ext_has_board
-            executed = False
-            t0 = time.monotonic()
+            use_ext = (self.mode in ("auto", "ext")) and len(self.ext_clients) > 0
             if use_ext:
-                payload = json.dumps({
-                    "type": "move",
-                    "uci": best_uci,
-                    "from": best_uci[:2],
-                    "to": best_uci[2:4],
-                    "promotion": best_uci[4] if len(best_uci) > 4 else None,
-                    "sentAt": time.time() * 1000,
-                })
-                for ws in list(self.ext_clients):
-                    try:
-                        await ws.send(payload)
-                        executed = True
-                    except Exception:
-                        self.ext_clients.discard(ws)
+                self._pending_move_uci = best_uci
+                self._pending_move_ts = time.monotonic()
+                await self._send_move_to_ext(best_uci)
             elif self.cv.zones["board"]:
+                t0 = time.monotonic()
                 executed = await asyncio.get_running_loop().run_in_executor(
                     None,
                     self.mouse.execute_uci_move,
@@ -1321,11 +1360,10 @@ class BridgeOrchestrator:
                 self._record_latency_sample((time.monotonic() - t0) * 1000.0)
                 await asyncio.sleep(0.05)
                 self.cv.reset_reference()
-
-            if executed:
-                self._apply_move_internal(move)
-                if self.ponder_enabled and not self.board.is_game_over():
-                    await self._start_ponder_on_opponent_turn(ponder_uci)
+                if executed:
+                    self._apply_move_internal(move)
+                    if self.ponder_enabled and not self.board.is_game_over():
+                        await self._start_ponder_on_opponent_turn(ponder_uci)
 
     def _apply_move_internal(self, move: chess.Move):
         self._tick_virtual_clocks()
@@ -1369,6 +1407,7 @@ class BridgeOrchestrator:
     async def _trigger_our_turn_search(self, last_opp_move_uci=None):
         if self.board.is_game_over() or self.board.turn != self.our_color:
             return
+        self._pending_move_uci = None
         if (
             self.ponder_enabled
             and self.engine.is_thinking
@@ -1392,21 +1431,9 @@ class BridgeOrchestrator:
         )
 
     def _reconcile_board_by_fen(self, fen_clean):
-        parts = fen_clean.split()
-        target_map = parts[0]
-        target_turn = parts[1] if len(parts) > 1 else None
+        target_map = fen_clean.split()[0]
         curr_map = self.board.fen().split()[0]
-        curr_turn = "w" if self.board.turn == chess.WHITE else "b"
-
         if target_map == curr_map:
-            if target_turn in ("w", "b") and target_turn != curr_turn:
-                try:
-                    self.board = self._create_board(fen=fen_clean)
-                    self.start_fen = self.board.fen()
-                    self.move_history.clear()
-                    return True, None
-                except Exception:
-                    pass
             return False, None
 
         for m1 in self.board.legal_moves:
@@ -1416,26 +1443,6 @@ class BridgeOrchestrator:
                 self.move_history.append(u1)
                 return True, u1
             self.board.pop()
-
-        if len(self.move_history) > 0 and len(self.board.move_stack) > 0:
-            last_pushed = self.board.pop()
-            prev_uci = self.move_history.pop()
-            for m_alt in self.board.legal_moves:
-                self.board.push(m_alt)
-                if self.board.fen().split()[0] == target_map:
-                    u_alt = m_alt.uci()
-                    self.move_history.append(u_alt)
-                    return True, u_alt
-                for m2 in self.board.legal_moves:
-                    self.board.push(m2)
-                    if self.board.fen().split()[0] == target_map:
-                        u_alt, u2 = m_alt.uci(), m2.uci()
-                        self.move_history.extend([u_alt, u2])
-                        return True, u2
-                    self.board.pop()
-                self.board.pop()
-            self.board.push(last_pushed)
-            self.move_history.append(prev_uci)
 
         for m1 in self.board.legal_moves:
             self.board.push(m1)
@@ -1456,12 +1463,8 @@ class BridgeOrchestrator:
         except Exception:
             return False, None
 
-    async def handle_external_position(self, fen=None, uci_moves=None, san_moves=None, our_color_str=None, wtime=None, btime=None, inc=None, site=None):
+    async def handle_external_position(self, fen=None, uci_moves=None, san_moves=None, our_color_str=None, wtime=None, btime=None, inc=None, is_new_game=False):
         async with self._lock:
-            self.ext_has_board = True
-            first_sync = not self.synced_once
-            self.synced_once = True
-
             color_changed = False
             if our_color_str in ("white", "w") and self.our_color != chess.WHITE:
                 self.our_color = chess.WHITE
@@ -1480,9 +1483,27 @@ class BridgeOrchestrator:
                 self.inc_ms = int(inc)
             self.last_clock_tick = time.monotonic()
 
+            incoming_count = None
+            if uci_moves is not None and len(uci_moves) > 0:
+                incoming_count = len(uci_moves)
+            elif san_moves is not None and len(san_moves) > 0:
+                incoming_count = len(san_moves)
+            elif fen and fen.strip().startswith("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"):
+                incoming_count = 0
+
+            if is_new_game or (len(self.move_history) > 2 and incoming_count is not None and incoming_count <= 2):
+                await self.engine.new_game()
+                self.start_fen = chess.STARTING_FEN
+                self.board = self._create_board()
+                self.move_history.clear()
+                self._pending_move_uci = None
+                self._pending_ponder_uci = None
+                col_name = "WHITE" if self.our_color == chess.WHITE else "BLACK"
+                sys.stdout.write(f"\r\033[K\033[95m[NEW GAME] Playing as {col_name}\033[0m\n")
+                sys.stdout.flush()
+
             changed = False
             last_move_uci = None
-            target_piece_map = fen.strip().split()[0] if fen else None
 
             if uci_moves is not None and len(uci_moves) > 0:
                 new_board = self._create_board(fen=chess.STARTING_FEN)
@@ -1497,15 +1518,14 @@ class BridgeOrchestrator:
                             break
                     except Exception:
                         break
-                if valid_ucis and (not target_piece_map or new_board.fen().split()[0] == target_piece_map):
-                    if valid_ucis != self.move_history:
-                        last_move_uci = valid_ucis[-1]
-                        self.start_fen = chess.STARTING_FEN
-                        self.board = new_board
-                        self.move_history = valid_ucis
-                        changed = True
+                if valid_ucis and valid_ucis != self.move_history:
+                    last_move_uci = valid_ucis[-1]
+                    self.start_fen = chess.STARTING_FEN
+                    self.board = new_board
+                    self.move_history = valid_ucis
+                    changed = True
 
-            if not changed and san_moves is not None and len(san_moves) > 0:
+            elif san_moves is not None and len(san_moves) > 0:
                 new_board = self._create_board(fen=chess.STARTING_FEN)
                 valid_ucis = []
                 for s in san_moves:
@@ -1515,13 +1535,12 @@ class BridgeOrchestrator:
                         valid_ucis.append(m.uci())
                     except Exception:
                         break
-                if valid_ucis and (not target_piece_map or new_board.fen().split()[0] == target_piece_map):
-                    if valid_ucis != self.move_history:
-                        last_move_uci = valid_ucis[-1]
-                        self.start_fen = chess.STARTING_FEN
-                        self.board = new_board
-                        self.move_history = valid_ucis
-                        changed = True
+                if valid_ucis and valid_ucis != self.move_history:
+                    last_move_uci = valid_ucis[-1]
+                    self.start_fen = chess.STARTING_FEN
+                    self.board = new_board
+                    self.move_history = valid_ucis
+                    changed = True
 
             if fen:
                 fen_clean = fen.strip()
@@ -1531,40 +1550,45 @@ class BridgeOrchestrator:
                         self.start_fen = chess.STARTING_FEN
                         self.board = self._create_board()
                         self.move_history.clear()
+                        self._pending_move_uci = None
                         changed = True
-                elif self.board.fen().split()[0] != fen_clean.split()[0] or (
-                    len(fen_clean.split()) > 1 and (
-                        (fen_clean.split()[1] == "w" and self.board.turn != chess.WHITE) or
-                        (fen_clean.split()[1] == "b" and self.board.turn != chess.BLACK)
-                    )
-                ):
+                elif self.board.fen().split()[0] != fen_clean.split()[0]:
                     rec_changed, rec_last = self._reconcile_board_by_fen(fen_clean)
                     if rec_changed:
                         changed = True
                         last_move_uci = rec_last
 
-            if first_sync or color_changed or changed:
-                c_str = "WHITE" if self.our_color == chess.WHITE else "BLACK"
-                t_str = "WHITE" if self.board.turn == chess.WHITE else "BLACK"
-                s_name = site or "browser"
+            if changed:
+                self._pending_move_uci = None
+                col_str = "WHITE" if self.our_color == chess.WHITE else "BLACK"
+                turn_str = "WHITE" if self.board.turn == chess.WHITE else "BLACK"
                 sys.stdout.write(
-                    f"\r\033[K\033[95m[SYNC] {s_name} | playing: {c_str} | turn: {t_str} | moves: {len(self.move_history)}\033[0m\n"
+                    f"\r\033[K\033[90m[SYNC] playing: {col_str} | turn: {turn_str} | moves: {len(self.move_history)} | last: {last_move_uci or '-'}\033[0m\n"
                 )
                 sys.stdout.flush()
 
-            if self.board.turn == self.our_color and not self.board.is_game_over():
-                if first_sync or changed or color_changed or not self.engine.is_thinking or self.engine.is_pondering or self.engine.ponder_auxiliary:
+            if self.board.is_game_over():
+                await self.engine.abort_search()
+                return
+
+            if self.board.turn == self.our_color:
+                if changed or color_changed:
                     await self._trigger_our_turn_search(last_opp_move_uci=last_move_uci)
-            elif self.board.turn != self.our_color and not self.board.is_game_over():
+                elif self._pending_move_uci and self.autoplay:
+                    if time.monotonic() - self._pending_move_ts > 0.22:
+                        self._pending_move_ts = time.monotonic()
+                        await self._send_move_to_ext(self._pending_move_uci)
+                elif not self.engine.is_thinking or self.engine.is_pondering or self.engine.ponder_auxiliary:
+                    await self._trigger_our_turn_search(last_opp_move_uci=last_move_uci)
+            else:
                 if self.engine.is_thinking and not self.engine.is_pondering and not self.engine.ponder_auxiliary:
-                    await self.engine.stop()
-                if self.ponder_enabled and (first_sync or changed or color_changed or not self.engine.is_thinking):
-                    await self._start_ponder_on_opponent_turn(self.engine.ponder_reply)
+                    await self.engine.abort_search()
+                if self.ponder_enabled and (changed or color_changed or not self.engine.is_thinking):
+                    await self._start_ponder_on_opponent_turn(self._pending_ponder_uci or self.engine.ponder_reply)
 
     async def ws_handler(self, websocket):
         self.ext_clients.add(websocket)
         try:
-            await websocket.send(json.dumps({"type": "request_sync"}))
             async for raw in websocket:
                 if self.mode == "cv":
                     continue
@@ -1596,21 +1620,19 @@ class BridgeOrchestrator:
                         wtime=wt,
                         btime=bt,
                         inc=msg.get("increment"),
-                        site=msg.get("site"),
+                        is_new_game=bool(msg.get("isNewGame", False)),
                     )
         except Exception:
             pass
         finally:
             self.ext_clients.discard(websocket)
-            if len(self.ext_clients) == 0:
-                self.ext_has_board = False
 
     async def cv_loop(self):
         while True:
             await asyncio.sleep(1.0 / max(1, min(60, self.cv.fps)))
             if self.mode == "ext":
                 continue
-            if self.mode == "auto" and self.ext_has_board:
+            if self.mode == "auto" and len(self.ext_clients) > 0:
                 continue
             if not self.cv.zones["board"]:
                 continue
@@ -1628,7 +1650,7 @@ class BridgeOrchestrator:
                             await self._trigger_our_turn_search(last_opp_move_uci=uci_str)
                         elif self.board.turn != self.our_color and not self.board.is_game_over():
                             if self.ponder_enabled:
-                                await self._start_ponder_on_opponent_turn(self.engine.ponder_reply)
+                                await self._start_ponder_on_opponent_turn(self._pending_ponder_uci or self.engine.ponder_reply)
             except Exception:
                 pass
 
@@ -1660,7 +1682,8 @@ class BridgeOrchestrator:
         print("\n" + "=" * 64)
         print(" Commands:")
         print("   set <key> <val>          - Change any config or Stockfish UCI setting live")
-        print("   pace <val>               - Unified speed/limit: e.g. '0.5x', '600ms', 'd20', '500ms d18'")
+        print("   pace <val>               - Speed/limit: '0.5x', '600ms', 'd20', '500ms d18'")
+        print("   threads <N> | hash <MB>  - Set CPU threads and RAM hash size")
         print("   autoplay <on|off>        - Toggle automatic move execution")
         print("   ponder <on|off>          - Toggle real-time opponent prediction & reply")
         print("   mode <auto|ext|cv>       - Switch input source")
@@ -1678,6 +1701,11 @@ class BridgeOrchestrator:
         v = val_str.strip()
         v_low = v.lower()
         as_bool = v_low in ("on", "1", "true", "yes")
+
+        if k_low in ("skill", "skill_level", "elo", "uci_elo", "uci_limitstrength", "contempt"):
+            sys.stdout.write("\r\033[K[!] Engine strength is locked to dynamic maximum.\n")
+            sys.stdout.flush()
+            return
 
         if k_low in ("pace", "limit"):
             self.cfg["pace"] = v
@@ -1697,14 +1725,6 @@ class BridgeOrchestrator:
             self.cfg["stockfish_uci"]["Hash"] = max(16, int(v))
         elif k_low == "ponder":
             self.cfg["stockfish_uci"]["Ponder"] = as_bool
-        elif k_low in ("skill", "skill_level"):
-            self.cfg["stockfish_uci"]["Skill Level"] = max(0, min(20, int(v)))
-        elif k_low in ("elo", "uci_elo"):
-            if v_low in ("off", "false", "0", "max"):
-                self.cfg["stockfish_uci"]["UCI_LimitStrength"] = False
-            else:
-                self.cfg["stockfish_uci"]["UCI_LimitStrength"] = True
-                self.cfg["stockfish_uci"]["UCI_Elo"] = max(1320, min(3190, int(v)))
         elif k_low in ("chess960", "uci_chess960"):
             self.cfg["stockfish_uci"]["UCI_Chess960"] = as_bool
         elif k_low in ("variant", "uci_variant"):
@@ -1730,17 +1750,10 @@ class BridgeOrchestrator:
         sys.stdout.write(f"\r\033[K[+] Updated '{k}' -> saved to config.json\n")
         sys.stdout.flush()
 
-        for ws in list(self.ext_clients):
-            try:
-                await ws.send(json.dumps({"type": "request_sync"}))
-            except Exception:
-                pass
-
-        if (self.ext_has_board or self.cv.zones["board"]) and not self.board.is_game_over():
-            if self.board.turn == self.our_color:
-                await self._trigger_our_turn_search()
-            elif self.ponder_enabled:
-                await self._start_ponder_on_opponent_turn(self.engine.ponder_reply)
+        if self.board.turn == self.our_color and not self.board.is_game_over():
+            await self._trigger_our_turn_search()
+        elif self.board.turn != self.our_color and self.ponder_enabled and not self.board.is_game_over():
+            await self._start_ponder_on_opponent_turn(self._pending_ponder_uci or self.engine.ponder_reply)
 
     async def process_cli_line(self, line):
         parts = line.strip().split()
@@ -1755,15 +1768,10 @@ class BridgeOrchestrator:
         elif cmd in ("quit", "exit"):
             return False
         elif cmd == "sync":
-            for ws in list(self.ext_clients):
-                try:
-                    await ws.send(json.dumps({"type": "request_sync"}))
-                except Exception:
-                    pass
             ok, msg = await asyncio.get_running_loop().run_in_executor(None, self.cv.sync_from_clipboard_image)
             if ok:
                 self.our_color = chess.BLACK if self.cv.flipped else chess.WHITE
-            sys.stdout.write(f"\r\033[K[{'+' if ok else '*'}] {msg}\n")
+            sys.stdout.write(f"\r\033[K[{'+' if ok else '-'}] {msg}\n")
             sys.stdout.flush()
             if ok and self.board.turn == self.our_color:
                 await self._trigger_our_turn_search()
@@ -1794,7 +1802,7 @@ class BridgeOrchestrator:
                 ConfigManager.save(self.cfg)
                 self._cfg_mtime = os.path.getmtime(CONFIG_PATH)
                 await self.engine.start()
-                sys.stdout.write(f"\r\033[K[+] Engine active: {self.engine.name}\n")
+                sys.stdout.write(f"\r\033[K[+] Engine active (Max Strength): {self.engine.name}\n")
             else:
                 sys.stdout.write(f"\r\033[K[-] Invalid UCI engine binary: {arg}\n")
             sys.stdout.flush()
@@ -1826,7 +1834,7 @@ class BridgeOrchestrator:
         self.loop = asyncio.get_running_loop()
         ok = await self.engine.start()
         if ok:
-            print(f"[+] Engine online: {self.engine.name} | Config: {CONFIG_PATH}")
+            print(f"[+] Engine online (Max Strength): {self.engine.name} | Config: {CONFIG_PATH}")
         cv_task = asyncio.create_task(self.cv_loop())
         cfg_task = asyncio.create_task(self.watch_config_loop())
         try:

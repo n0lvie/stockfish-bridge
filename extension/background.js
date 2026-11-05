@@ -4,28 +4,7 @@ let ws = null;
 let serverUrl = 'ws://127.0.0.1:9999';
 let reconnectTimer = null;
 let pingTimer = null;
-let lastStateMsg = null;
 const ports = new Set();
-
-function injectIntoExistingTabs() {
-  if (!chrome.tabs || !chrome.scripting) return;
-  chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] }, (tabs) => {
-    if (chrome.runtime.lastError || !tabs) return;
-    for (const tab of tabs) {
-      if (!tab.id || !tab.url || tab.url.startsWith('chrome://')) continue;
-      chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: ['content.js'],
-        world: 'MAIN'
-      }).catch(() => {});
-      chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: ['content.js'],
-        world: 'ISOLATED'
-      }).catch(() => {});
-    }
-  });
-}
 
 function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
@@ -45,15 +24,7 @@ function connect() {
         ws.send(JSON.stringify({ type: 'ping', ts: performance.now() }));
       }
     }, 2500);
-    if (ports.size === 0) {
-      injectIntoExistingTabs();
-    }
-    broadcast({ type: 'request_sync' });
-    if (lastStateMsg && ws.readyState === WebSocket.OPEN) {
-      try {
-        ws.send(JSON.stringify(lastStateMsg));
-      } catch (e) {}
-    }
+    broadcast({ type: 'connected', connected: true });
   };
 
   ws.onmessage = (ev) => {
@@ -66,14 +37,6 @@ function connect() {
         }
         return;
       }
-      if (msg.type === 'request_sync') {
-        if (ports.size === 0) injectIntoExistingTabs();
-        broadcast({ type: 'request_sync' });
-        if (lastStateMsg && ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify(lastStateMsg));
-        }
-        return;
-      }
       broadcast(msg);
     } catch (e) {}
   };
@@ -81,6 +44,7 @@ function connect() {
   ws.onclose = () => {
     ws = null;
     clearInterval(pingTimer);
+    broadcast({ type: 'connected', connected: false });
     scheduleReconnect();
   };
 
@@ -105,38 +69,19 @@ function broadcast(msg) {
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'uci-bridge') return;
   ports.add(port);
-  try {
-    port.postMessage({ type: 'request_sync' });
-  } catch (e) {}
-
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      port.postMessage({ type: 'connected', connected: true });
+    } catch (e) {}
+  }
   port.onMessage.addListener((msg) => {
-    if (!msg) return;
-    if (msg.type === 'state') {
-      lastStateMsg = msg;
-    }
     if (ws && ws.readyState === WebSocket.OPEN) {
-      try {
-        ws.send(JSON.stringify(msg));
-      } catch (e) {}
-    } else {
-      connect();
+      ws.send(JSON.stringify(msg));
     }
   });
-
   port.onDisconnect.addListener(() => {
     ports.delete(port);
   });
 });
 
-chrome.runtime.onInstalled.addListener(() => {
-  injectIntoExistingTabs();
-  connect();
-});
-
-chrome.runtime.onStartup.addListener(() => {
-  injectIntoExistingTabs();
-  connect();
-});
-
-injectIntoExistingTabs();
 connect();

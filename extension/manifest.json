@@ -4,8 +4,7 @@
   "version": "5.0.0",
   "permissions": [
     "storage",
-    "tabs",
-    "scripting"
+    "tabs"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -21,7 +20,7 @@
       "js": [
         "content.js"
       ],
-      "run_at": "document_start",
+      "run_at": "document_idle",
       "world": "MAIN"
     },
     {
