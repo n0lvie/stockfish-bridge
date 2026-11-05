@@ -1,15 +1,57 @@
+# Python
 __pycache__/
-*.pyc
-.gemini/
-.system_generated/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+.venv/
+env/
+
+# Tests / cache
+.pytest_cache/
+.coverage
+htmlcov/
 *.log
-temp/
-scratch/
+
+# Editors / OS
 .idea/
 .vscode/
-*.png
-!extension/icons/*.png
-.agents/
-server/bin/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project runtime / secrets
 server/settings.json
-.pytest_cache/
+server/bin/
+server/dashboard/screen.jpg
+
+# Docs / meta (не нужны в репо)
+*.md
+*.txt
+*.bat
+*.sh
+*.ini
+
+# Agent / AI infra
+.agents/
+.gemini/
+.system_generated/
+
+# Temp / scratch
+temp/
+scratch/
+tmp/
+
+# Images (кроме иконок расширения)
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+!extension/icons/*.png

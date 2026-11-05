@@ -699,7 +699,7 @@
         clocks.oppTimeMs,
         ourTurn,
         null,
-        0,
+        Bridge._moveNumber,
         0
       );
     } catch (e) {

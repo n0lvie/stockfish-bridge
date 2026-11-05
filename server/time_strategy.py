@@ -40,24 +40,24 @@ class TimeStrategy:
         Returns:
             (target_time_ms, target_depth, speed_name)
         """
-        # 1. Check if Untimed Game
+        # 1. Check if Untimed Game (correspondence / unlimited)
         if self.is_untimed(our_time_ms, opp_time_ms):
-            # Speed 1 (Opening, <= 6 moves)
-            if move_number <= 6:
-                return 500, 10, "Speed 1 (Opening, Untimed)"
+            # Speed 1 (Opening, <= 10 moves) - think deeper on correspondence
+            if move_number <= 10:
+                return 3000, 20, "Speed 1 (Opening, Untimed)"
             
             # Speed 2 (Destruction / Crush)
             is_crushing = (last_score_type == "mate" and last_score_cp > 0) or (last_score_type == "cp" and last_score_cp > 400)
             if is_crushing:
-                return 1000, 14, "Speed 2 (Destruction, Untimed)"
+                return 5000, 24, "Speed 2 (Destruction, Untimed)"
             
             # Speed 4 (Survival)
             is_losing = (last_score_type == "mate" and last_score_cp < 0) or (last_score_type == "cp" and last_score_cp < -150)
             if is_losing:
-                return 4000, 20, "Speed 4 (Survival, Untimed)"
+                return 15000, 28, "Speed 4 (Survival, Untimed)"
             
-            # Speed 3 (Grind)
-            return 2000, 18, "Speed 3 (Grind, Untimed)"
+            # Speed 3 (Grind) - correspondence: think hard
+            return 10000, 26, "Speed 3 (Grind, Untimed)"
 
         # 2. Check Panic Mode (< 10s remaining)
         if our_time_ms < 10000:
