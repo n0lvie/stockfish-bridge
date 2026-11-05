@@ -216,6 +216,64 @@
           } catch(e) {}
         }
         setInterval(poll, 100);
+
+        function findChessground() {
+          try {
+            const b = document.querySelector('cg-board');
+            if (b) {
+              if (b.parentElement && b.parentElement.chessground) return b.parentElement.chessground;
+              if (b.chessground) return b.chessground;
+              const wrap = b.closest('cg-wrap, .cg-wrap, cg-container');
+              if (wrap && wrap.chessground) return wrap.chessground;
+            }
+            if (window.lichess) {
+              if (window.lichess.analysis && window.lichess.analysis.chessground) return window.lichess.analysis.chessground;
+              if (window.lichess.round && window.lichess.round.chessground) return window.lichess.round.chessground;
+              if (window.lichess.puzzle && window.lichess.puzzle.chessground) return window.lichess.puzzle.chessground;
+            }
+          } catch (e) {}
+          return null;
+        }
+
+        window.addEventListener('message', function(event) {
+          if (event.source !== window || !event.data || event.data.type !== 'stockfish-bridge-make-move') return;
+          const from = event.data.from;
+          const to = event.data.to;
+          const promotion = event.data.promotion;
+          console.log('[StockfishBridge:MainWorld] Received move request:', from, '->', to, promotion);
+
+          const cg = findChessground();
+          if (cg) {
+            console.log('[StockfishBridge:MainWorld] Chessground found, executing selectSquare...');
+            if (typeof cg.selectSquare === 'function') {
+              cg.selectSquare(from);
+              setTimeout(function() {
+                cg.selectSquare(to);
+                if (promotion) {
+                  setTimeout(function() {
+                    const pName = { q: 'queen', r: 'rook', b: 'bishop', n: 'knight' }[promotion.toLowerCase()] || 'queen';
+                    const pEl = document.querySelector('#promotion-choice piece.' + pName + ', .promotion-choice piece.' + pName + ', piece.' + pName);
+                    if (pEl) pEl.click();
+                  }, 50);
+                }
+              }, 80);
+              return;
+            }
+            if (typeof cg.userMove === 'function') {
+              cg.userMove(from, to);
+              return;
+            }
+            if (typeof cg.move === 'function') {
+              cg.move(from, to);
+              if (cg.state && cg.state.movable && cg.state.movable.events && cg.state.movable.events.after) {
+                cg.state.movable.events.after(from, to, {});
+              }
+              return;
+            }
+          } else {
+            console.warn('[StockfishBridge:MainWorld] Chessground instance not found in main world');
+          }
+        });
       })();
     `;
     (document.head || document.documentElement).appendChild(script);
@@ -722,39 +780,70 @@
   
 
   
+  function clickBoardSquare(square, boardRect, squareSize, isFlipped) {
+    const { file, rank } = squareToFileRank(square);
+    const x = isFlipped
+      ? boardRect.left + (7 - file + 0.5) * squareSize
+      : boardRect.left + (file + 0.5) * squareSize;
+    const y = isFlipped
+      ? boardRect.top + (rank + 0.5) * squareSize
+      : boardRect.top + (7 - rank + 0.5) * squareSize;
+
+    const target = document.elementFromPoint(x, y) || boardEl;
+    if (!target) return;
+
+    target.dispatchEvent(new PointerEvent('pointerdown', {
+      bubbles: true, cancelable: true, composed: true, view: window,
+      clientX: x, clientY: y, button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true
+    }));
+    target.dispatchEvent(new PointerEvent('pointerup', {
+      bubbles: true, cancelable: true, composed: true, view: window,
+      clientX: x, clientY: y, button: 0, buttons: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+    }));
+    target.dispatchEvent(new MouseEvent('mousedown', {
+      bubbles: true, cancelable: true, composed: true, view: window,
+      clientX: x, clientY: y, button: 0, buttons: 1
+    }));
+    target.dispatchEvent(new MouseEvent('mouseup', {
+      bubbles: true, cancelable: true, composed: true, view: window,
+      clientX: x, clientY: y, button: 0, buttons: 0
+    }));
+    target.dispatchEvent(new MouseEvent('click', {
+      bubbles: true, cancelable: true, composed: true, view: window,
+      clientX: x, clientY: y, button: 0, buttons: 0
+    }));
+  }
+
   function makeMove(uci, from, to, promotion) {
-    console.log('[StockfishBridge] Making move on lichess:', uci);
+    console.log('[StockfishBridge] Making move on lichess:', uci, from, to, promotion);
 
+    // 1. Post to MainWorld (Direct Chessground instance API)
+    window.postMessage({
+      type: 'stockfish-bridge-make-move',
+      uci: uci,
+      from: from,
+      to: to,
+      promotion: promotion
+    }, '*');
+
+    // 2. Sequential DOM click-to-move fallback (120ms separation)
     if (!boardEl) {
-      console.error('[StockfishBridge] No board element for move execution');
-      return false;
+      boardEl = document.querySelector('cg-board');
     }
+    if (boardEl) {
+      const boardRect = boardEl.getBoundingClientRect();
+      const squareSize = boardRect.width / 8;
+      const isFlipped = cgWrap ? (cgWrap.classList.contains('orientation-black') || cgWrap.getAttribute('orientation') === 'black') : false;
 
-    const boardRect = boardEl.getBoundingClientRect();
-    const squareSize = boardRect.width / 8;
-    const isFlipped = cgWrap ? cgWrap.classList.contains('orientation-black') : false;
-
-    const fromCoords = getSquareCenter(from, squareSize, isFlipped, boardRect);
-    const toCoords = getSquareCenter(to, squareSize, isFlipped, boardRect);
-
-    const fromTarget = document.elementFromPoint(fromCoords.x, fromCoords.y) || boardEl;
-    const toTarget = document.elementFromPoint(toCoords.x, toCoords.y) || boardEl;
-
-    // 1. Immediate crisp Pointer & Mouse drag dispatch (sub-10ms overhead)
-    simulatePointerEvent('pointerdown', fromTarget, fromCoords.x, fromCoords.y);
-    simulateMouseEvent('mousedown', fromTarget, fromCoords.x, fromCoords.y);
-    simulatePointerEvent('pointermove', boardEl, toCoords.x, toCoords.y);
-    simulateMouseEvent('mousemove', boardEl, toCoords.x, toCoords.y);
-    simulatePointerEvent('pointerup', toTarget, toCoords.x, toCoords.y);
-    simulateMouseEvent('mouseup', toTarget, toCoords.x, toCoords.y);
-
-    // 2. Immediate Click-to-Move fallback
-    simulateClick(fromTarget, fromCoords.x, fromCoords.y);
-    simulateClick(toTarget, toCoords.x, toCoords.y);
-
-    // 3. Fast promotion selection (no artificial 300ms sleep)
-    if (promotion) {
-      selectPromotionFast(promotion);
+      setTimeout(() => {
+        clickBoardSquare(from, boardRect, squareSize, isFlipped);
+        setTimeout(() => {
+          clickBoardSquare(to, boardRect, squareSize, isFlipped);
+          if (promotion) {
+            selectPromotionFast(promotion);
+          }
+        }, 120);
+      }, 50);
     }
 
     return true;

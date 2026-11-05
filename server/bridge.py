@@ -588,6 +588,7 @@ class ChessBridge:
                                 "to": best_move[2:4],
                                 "promotion": best_move[4] if len(best_move) > 4 else None
                             }
+                            logger.info("[MoveDispatcher] Sending move to extension: %s", best_move)
                             await self._send(ws, move_msg)
                             await self._send(ws, {"type": "status", "state": "stopped"})
                     elif self._mode == "cv":
@@ -626,6 +627,7 @@ class ChessBridge:
                                 "to": best_move[2:4],
                                 "promotion": best_move[4] if len(best_move) > 4 else None
                             }
+                            logger.info("[MoveDispatcher] Sending move to extension: %s", best_move)
                             await self._send(ws, move_msg)
                             await self._send(ws, {"type": "status", "state": "stopped"})
                     elif self._mode == "cv":

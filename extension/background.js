@@ -133,8 +133,14 @@ function connectWebSocket(serverUrl) {
         lastEngineInfo.state = data.state;
       }
 
+      if (data.type === 'autoplay_changed') {
+        autoPlay = data.autoPlay !== undefined ? data.autoPlay : true;
+        chrome.storage.local.set({ autoPlay });
+        console.log('[StockfishBridge] Background autoPlay updated from server:', autoPlay);
+      }
+
       if (data.type === 'move') {
-        data.autoPlay = autoPlay;
+        data.autoPlay = (autoPlay !== undefined) ? autoPlay : true;
       }
 
       // Route message to content script

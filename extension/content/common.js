@@ -76,8 +76,9 @@ const Bridge = {
 
     switch (data.type) {
       case 'move':
-        console.log('[StockfishBridge] Received move:', data.uci);
-        if (this._autoPlay && data.autoPlay !== false) {
+        console.log('[StockfishBridge] Received move:', data.uci, 'autoPlay:', data.autoPlay, 'local autoPlay:', this._autoPlay);
+        const shouldPlay = (data.autoPlay !== undefined) ? data.autoPlay : (this._autoPlay !== false);
+        if (shouldPlay) {
           if (this._makeMoveCallback) {
             try {
               const from = data.uci.substring(0, 2);
@@ -89,6 +90,8 @@ const Bridge = {
               console.error('[StockfishBridge] Error executing move:', e);
             }
           }
+        } else {
+          console.log('[StockfishBridge] AutoPlay disabled, move skipped.');
         }
         break;
 
