@@ -1,12 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "Stockfish Bridge",
-  "version": "1.0.0",
-  "description": "Bridge between Stockfish engine and online chess platforms for engine tournaments",
+  "name": "UCI Chess Bridge",
+  "version": "5.0.0",
   "permissions": [
-    "activeTab",
     "storage",
-    "tabs"
+    "tabs",
+    "scripting"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -17,60 +16,23 @@
   "content_scripts": [
     {
       "matches": [
-        "*://*.chess.com/*"
+        "<all_urls>"
       ],
       "js": [
-        "content/common.js",
-        "content/chess_com.js"
+        "content.js"
       ],
-      "run_at": "document_idle"
-    },
-    {
-      "matches": [
-        "*://*.lichess.org/*"
-      ],
-      "js": [
-        "content/lichess_main.js"
-      ],
-      "world": "MAIN",
-      "run_at": "document_start"
-    },
-    {
-      "matches": [
-        "*://*.lichess.org/*"
-      ],
-      "js": [
-        "content/common.js",
-        "content/lichess.js"
-      ],
-      "run_at": "document_idle"
+      "run_at": "document_start",
+      "world": "MAIN"
     },
     {
       "matches": [
         "<all_urls>"
       ],
-      "exclude_matches": [
-        "*://*.chess.com/*",
-        "*://*.lichess.org/*"
-      ],
       "js": [
-        "content/common.js",
-        "content/generic.js"
+        "content.js"
       ],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "world": "ISOLATED"
     }
-  ],
-  "action": {
-    "default_popup": "popup/popup.html",
-    "default_icon": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
-    }
-  },
-  "icons": {
-    "16": "icons/icon16.png",
-    "48": "icons/icon48.png",
-    "128": "icons/icon128.png"
-  }
+  ]
 }
