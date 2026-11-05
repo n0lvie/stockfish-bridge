@@ -3,7 +3,7 @@
   "name": "Stockfish Bridge",
   "version": "1.0.0",
   "description": "Bridge between Stockfish engine and online chess platforms for engine tournaments",
-  "permissions": ["activeTab", "storage"],
+  "permissions": ["activeTab", "storage", "tabs"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"

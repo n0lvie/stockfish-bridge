@@ -11,20 +11,25 @@ from typing import Optional, Callable, Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
+try:
+    from config import sanitize_threads, sanitize_hash, sanitize_multipv, sanitize_syzygy_path
+except ImportError:
+    from server.config import sanitize_threads, sanitize_hash, sanitize_multipv, sanitize_syzygy_path
+
 class StockfishEngine:
 
-    def __init__(self, path="stockfish", threads=None, hash_mb=None, multi_pv=1):
-                                                                
+    def __init__(self, path="stockfish", threads=None, hash_mb=None, multi_pv=1, syzygy_path=None):
         self.path = path             
-        self._threads = threads                       
-        self._hash_mb = hash_mb                       
-        self._multi_pv = multi_pv             
+        self._threads = sanitize_threads(threads) if threads is not None else None                       
+        self._hash_mb = sanitize_hash(hash_mb) if hash_mb is not None else None                       
+        self._multi_pv = sanitize_multipv(multi_pv) if multi_pv is not None else 1
+        self._syzygy_path = sanitize_syzygy_path(syzygy_path)
 
         import psutil
         self.cpu_cores = psutil.cpu_count(logical=True) or 1
         self.is_auto_mode = True
-        self.manual_threads = max(1, self.cpu_cores // 2)
-        self.manual_hash = 256
+        self.manual_threads = self._threads or max(1, self.cpu_cores // 2)
+        self.manual_hash = self._hash_mb or 256
         self.manual_depth = 0
         self.quality_factor = 1.0                                     
         
@@ -34,6 +39,7 @@ class StockfishEngine:
         self._process = None                                              
 
         self._reader_task = None                                
+        self._stderr_reader_task = None
 
         self._is_thinking = False              
         self._bestmove_event = asyncio.Event()
@@ -59,8 +65,53 @@ class StockfishEngine:
         self.on_bestmove = None                                         
 
     async def set_option(self, name, value):
-                                         
         await self._send(f"setoption name {name} value {value}")
+        if self._alive:
+            self._ready_event.clear()
+            await self._send("isready")
+            try:
+                await asyncio.wait_for(self._ready_event.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                pass
+
+    async def update_tuning(self, threads=None, hash_mb=None, multi_pv=None, syzygy_path=None):
+        """
+        Dynamically update engine power parameters (Threads, Hash, MultiPV, SyzygyPath)
+        with proper isready/readyok synchronization.
+        """
+        if self._is_thinking:
+            await self.stop()
+
+        if threads is not None:
+            self._threads = sanitize_threads(threads)
+            self.manual_threads = self._threads
+            self._current_threads = self._threads
+            await self._send(f"setoption name Threads value {self._threads}")
+
+        if hash_mb is not None:
+            self._hash_mb = sanitize_hash(hash_mb)
+            self.manual_hash = self._hash_mb
+            self._current_hash = self._hash_mb
+            await self._send(f"setoption name Hash value {self._hash_mb}")
+
+        if multi_pv is not None:
+            self._multi_pv = sanitize_multipv(multi_pv)
+            await self._send(f"setoption name MultiPV value {self._multi_pv}")
+
+        if syzygy_path is not None:
+            self._syzygy_path = sanitize_syzygy_path(syzygy_path)
+            if self._syzygy_path:
+                await self._send(f"setoption name SyzygyPath value {self._syzygy_path}")
+            else:
+                await self._send("setoption name SyzygyPath value <none>")
+
+        if self._alive:
+            self._ready_event.clear()
+            await self._send("isready")
+            try:
+                await asyncio.wait_for(self._ready_event.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                raise RuntimeError("Stockfish did not respond with 'readyok' after update_tuning")
 
     def _get_optimal_settings(self):
         import psutil
@@ -105,6 +156,7 @@ class StockfishEngine:
         self._alive = True
 
         self._reader_task = asyncio.ensure_future(self._read_stdout())
+        self._stderr_reader_task = asyncio.ensure_future(self._read_stderr())
 
         self._uciok_event.clear()
         await self._send("uci")
@@ -116,8 +168,10 @@ class StockfishEngine:
         # Determine Threads and Hash based on optimization rules
         if self.is_auto_mode:
             opt_threads, opt_hash = self._get_optimal_settings()
-            self._threads = opt_threads
-            self._hash_mb = opt_hash
+            if self._threads is None:
+                self._threads = opt_threads
+            if self._hash_mb is None:
+                self._hash_mb = opt_hash
             logger.info(f"[Auto-Tuning] Configured Stockfish (Auto): Threads={self._threads}, Hash={self._hash_mb}MB")
         else:
             self._threads = self._threads or self.manual_threads
@@ -131,12 +185,14 @@ class StockfishEngine:
             await self._send("setoption name Hash value %d" % self._hash_mb)
             self._current_hash = self._hash_mb
 
-        # Enforce pure calculation using NNUE, disable SyzygyPath
+        # Enforce pure calculation using NNUE, configure SyzygyPath and MultiPV
         await self._send("setoption name Use NNUE value true")
-        await self._send("setoption name SyzygyPath value <none>")
+        if self._syzygy_path:
+            await self._send(f"setoption name SyzygyPath value {self._syzygy_path}")
+        else:
+            await self._send("setoption name SyzygyPath value <none>")
         await self._send("setoption name UCI_AnalyseMode value true")
-        if self._multi_pv > 1:
-            await self._send("setoption name MultiPV value %d" % self._multi_pv)
+        await self._send("setoption name MultiPV value %d" % self._multi_pv)
 
         self._ready_event.clear()
         await self._send("isready")
@@ -161,6 +217,13 @@ class StockfishEngine:
             self._reader_task.cancel()
             try:
                 await self._reader_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        if self._stderr_reader_task is not None and not self._stderr_reader_task.done():
+            self._stderr_reader_task.cancel()
+            try:
+                await self._stderr_reader_task
             except (asyncio.CancelledError, Exception):
                 pass
 
@@ -296,6 +359,23 @@ class StockfishEngine:
             self._bestmove_event.set()
             self._ready_event.set()
 
+    async def _read_stderr(self):
+        if self._process is None or self._process.stderr is None:
+            return
+
+        try:
+            while self._alive:
+                raw = await self._process.stderr.readline()
+                if not raw:
+                    break
+                line = raw.decode(errors="replace").strip()
+                if line:
+                    logger.debug("[Stockfish stderr] %s", line)
+        except asyncio.CancelledError:
+            logger.debug("Stderr reader task cancelled.")
+        except Exception as exc:
+            logger.debug("Stderr reader error: %s", exc)
+
     def _handle_bestmove(self, line):
 
         self._completed_searches += 1
@@ -311,7 +391,10 @@ class StockfishEngine:
 
         logger.debug("Best move received: %s", move)
 
-        if self.on_bestmove is not None and move is not None:
+        if move == "(none)":
+            logger.info("Stockfish returned bestmove (none) - game over or no legal moves.")
+
+        if self.on_bestmove is not None and move is not None and move != "(none)":
             try:
                 self.on_bestmove(move)
             except Exception:

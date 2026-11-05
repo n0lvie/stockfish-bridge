@@ -8,9 +8,17 @@ import pytest
 from PIL import Image
 
 # Ensure the project root and tests directories are in sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "server")))
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+# Prioritize project root before server/ so that root modules (e.g. start.py) are resolved first
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_SERVER_DIR = os.path.abspath(os.path.join(_PROJECT_ROOT, "server"))
+_TESTS_DIR = os.path.abspath(os.path.dirname(__file__))
+
+for _p in [_TESTS_DIR, _SERVER_DIR]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+if _PROJECT_ROOT in sys.path:
+    sys.path.remove(_PROJECT_ROOT)
+sys.path.insert(0, _PROJECT_ROOT)
 
 import pyautogui
 import server.bridge
@@ -30,14 +38,36 @@ def get_free_port():
 class MockProcess:
     def __init__(self):
         self.stdin = MockStdin(self)
-        self.stdout = asyncio.StreamReader()
-        self.stderr = asyncio.StreamReader()
+        self._stdout = None
+        self._stderr = None
         self.thinking_task = None
         self.stopped = False
+        self.received_commands = []
+        self.options = {}
+
+    @property
+    def stdout(self):
+        if self._stdout is None:
+            self._stdout = asyncio.StreamReader()
+        return self._stdout
+
+    @stdout.setter
+    def stdout(self, val):
+        self._stdout = val
+
+    @property
+    def stderr(self):
+        if self._stderr is None:
+            self._stderr = asyncio.StreamReader()
+        return self._stderr
+
+    @stderr.setter
+    def stderr(self, val):
+        self._stderr = val
 
     def kill(self):
         self.stopped = True
-        if self.thinking_task:
+        if self.thinking_task and not self.thinking_task.done():
             self.thinking_task.cancel()
 
     async def wait(self):
@@ -45,11 +75,19 @@ class MockProcess:
 
     def handle_command(self, cmd: str):
         cmd = cmd.strip()
+        self.received_commands.append(cmd)
         if cmd == "uci":
-            self.stdout.feed_data(b"uciok\n")
+            self.stdout.feed_data(b"id name Stockfish Mock\nid author Test\nuciok\n")
         elif cmd == "isready":
             self.stdout.feed_data(b"readyok\n")
-        elif cmd.startswith("go infinite") or cmd.startswith("go movetime"):
+        elif cmd.startswith("setoption name "):
+            rest = cmd[len("setoption name "):].strip()
+            if " value " in rest:
+                name, val = rest.split(" value ", 1)
+                self.options[name.strip()] = val.strip()
+            else:
+                self.options[rest.strip()] = "true"
+        elif cmd.startswith("go infinite") or cmd.startswith("go movetime") or cmd.startswith("go"):
             if self.thinking_task and not self.thinking_task.done():
                 self.thinking_task.cancel()
             self.thinking_task = asyncio.create_task(self._simulate_thinking())
@@ -67,7 +105,7 @@ class MockProcess:
                 info_line = f"info depth {depth} score cp 35 pv e2e4 nps 1000 time {depth*100} nodes {depth*100} multipv 1\n"
                 self.stdout.feed_data(info_line.encode('utf-8'))
                 depth += 1
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.05)
         except asyncio.CancelledError:
             pass
 
@@ -141,6 +179,15 @@ def mock_stockfish(monkeypatch):
     monkeypatch.setattr(server.engine.asyncio, "create_subprocess_exec", mock_create_subprocess_exec)
 
 @pytest.fixture
+def mock_stockfish_process(monkeypatch):
+    """Fixture providing direct access to the MockProcess instance created for StockfishEngine."""
+    proc = MockProcess()
+    async def _mock_exec(*args, **kwargs):
+        return proc
+    monkeypatch.setattr(server.engine.asyncio, "create_subprocess_exec", _mock_exec)
+    return proc
+
+@pytest.fixture
 def mock_server(monkeypatch, tmp_path, mock_stockfish, mock_screenshot, mock_pyautogui):
     import threading
     import time
@@ -154,7 +201,11 @@ def mock_server(monkeypatch, tmp_path, mock_stockfish, mock_screenshot, mock_pya
         host="127.0.0.1",
         port=port,
         stockfish_path="mock_stockfish",
+        threads=None,
+        hash=None,
         multi_pv=1,
+        syzygy_path=None,
+        mock=True,
         safety_buffer=2000
     )
     

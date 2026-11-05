@@ -9,8 +9,8 @@ def test_tier3_interaction_1_2_move_triggers_board_update(mock_board_page):
     and sends a new state message over WebSocket.
     """
     page = mock_board_page
-    # Setup initial board
-    pieces_html = '<div class="piece wp square-52"></div>'
+    # Setup initial board with kings to pass stability validation
+    pieces_html = '<div class="piece wk square-51"></div><div class="piece bk square-58"></div><div class="piece wp square-52"></div>'
     page.evaluate(f"document.querySelector('wc-chess-board').innerHTML = `{pieces_html}`;")
     page.wait_for_timeout(500)
     
@@ -24,8 +24,7 @@ def test_tier3_interaction_1_2_move_triggers_board_update(mock_board_page):
     # Check if state update was triggered
     messages = page.evaluate("window.getMockMessages();")
     state_msgs = [m.get('data') for m in messages if 'data' in m and m['data'].get('type') == 'state']
-    # Even if the mock move doesn't physically move in this mock board (since there's no actual logic in the HTML),
-    # the debounce timer should at least trigger. Wait, to truly test 1+2, we should test on a live board.
+    assert len(state_msgs) > 0, "Move execution did not trigger a state update"
 
 def test_tier3_interaction_1_2_live(live_chess_page):
     page = live_chess_page
@@ -70,13 +69,13 @@ def test_tier3_interaction_2_4_autoplay(mock_board_page):
     # Disable autoPlay
     page.evaluate("window.sendMockServerMessage({ type: 'autoplay_changed', autoPlay: false });")
     page.wait_for_timeout(100)
+    page.evaluate("window.getMockMessages();") # Clear message queue
     
     # Send move
     page.evaluate("window.sendMockServerMessage({ type: 'move', uci: 'e2e4' });")
     page.wait_for_timeout(500)
     
-    # We expect the move was NOT executed. We verify by checking if pointer events were dispatched?
-    # Since we are opaque-box, we can just ensure no DOM changes happened or state updates fired.
+    # We expect the move was NOT executed
     messages = page.evaluate("window.getMockMessages();")
     state_msgs = [m.get('data') for m in messages if 'data' in m and m['data'].get('type') == 'state']
     assert len(state_msgs) == 0, "Move executed despite autoPlay=false"

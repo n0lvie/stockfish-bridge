@@ -29,41 +29,76 @@
   }
 
   function identifyPieceType(el) {
+    if (!el) return null;
     const rawClass = getElementClassString(el);
-    const classes = rawClass.toLowerCase();
+    const classList = rawClass.toLowerCase().trim().split(/\s+/).filter(Boolean);
     const src = (el.src || el.getAttribute('src') || '').toLowerCase();
 
     let color = null;
     let type = null;
 
-    if (classes.includes('white') || classes.includes('wp') || classes.includes('wn') || 
-        classes.includes('wb') || classes.includes('wr') || classes.includes('wq') || 
-        classes.includes('wk') || src.includes('/w') || src.includes('white')) {
-      color = 'w';
-    } else if (classes.includes('black') || classes.includes('bp') || classes.includes('bn') || 
-               classes.includes('bb') || classes.includes('br') || classes.includes('bq') || 
-               classes.includes('bk') || src.includes('/b') || src.includes('black')) {
-      color = 'b';
-    }
-
-    const mappings = {
-      pawn: 'p', rook: 'r', knight: 'n', bishop: 'b', queen: 'q', king: 'k',
-      wp: 'p', wn: 'n', wb: 'b', wr: 'r', wq: 'q', wk: 'k',
+    const whitePieceMap = {
+      wp: 'p', wn: 'n', wb: 'b', wr: 'r', wq: 'q', wk: 'k'
+    };
+    const blackPieceMap = {
       bp: 'p', bn: 'n', bb: 'b', br: 'r', bq: 'q', bk: 'k'
     };
+    const genericPieceMap = {
+      pawn: 'p', rook: 'r', knight: 'n', bishop: 'b', queen: 'q', king: 'k'
+    };
 
-    for (const [key, val] of Object.entries(mappings)) {
-      if (classes.includes(key) || src.includes(key)) {
-        type = val;
+    for (const cls of classList) {
+      if (whitePieceMap[cls]) {
+        color = 'w';
+        type = whitePieceMap[cls];
+        break;
+      }
+      if (blackPieceMap[cls]) {
+        color = 'b';
+        type = blackPieceMap[cls];
         break;
       }
     }
 
+    if (!color) {
+      if (classList.includes('white') || classList.includes('w')) {
+        color = 'w';
+      } else if (classList.includes('black') || classList.includes('b')) {
+        color = 'b';
+      }
+    }
+
     if (!type) {
-      const match = classes.match(/([wb])([pnbrqk])/);
-      if (match) {
-        color = match[1];
-        type = match[2];
+      for (const cls of classList) {
+        if (genericPieceMap[cls]) {
+          type = genericPieceMap[cls];
+          break;
+        }
+      }
+    }
+
+    if (!type || !color) {
+      for (const cls of classList) {
+        const m = cls.match(/^([wb])[-_]?([pnbrqk])$/);
+        if (m) {
+          color = color || m[1];
+          type = type || m[2];
+          break;
+        }
+      }
+    }
+
+    if (!type || !color) {
+      const srcMatch = src.match(/(?:^|\/|[._-])([wb])([pnbrqk])(?:[._-]|\.png|\.svg|$)/i);
+      if (srcMatch) {
+        color = color || srcMatch[1].toLowerCase();
+        type = type || srcMatch[2].toLowerCase();
+      } else {
+        const srcLong = src.match(/(?:^|\/|[._-])(white|black)[-_]?(pawn|rook|knight|bishop|queen|king)(?:[._-]|\.png|\.svg|$)/i);
+        if (srcLong) {
+          color = color || (srcLong[1].toLowerCase() === 'white' ? 'w' : 'b');
+          type = type || genericPieceMap[srcLong[2].toLowerCase()];
+        }
       }
     }
 
@@ -118,7 +153,7 @@
   let gameActive = false;
   let lastSentFen = null;
   let debounceTimer = null;
-  const DEBOUNCE_MS = 50;
+  const DEBOUNCE_MS = 10;
   const CLOCK_POLL_MS = 100;
   const BOARD_POLL_MS = 500;
 
@@ -209,10 +244,17 @@
 
   
   function waitForBoard() {
+    boardEl = document.querySelector('cg-board');
+    if (boardEl) {
+      cgWrap = boardEl.closest('cg-wrap, .cg-wrap') || document.querySelector('cg-wrap, .cg-wrap');
+      console.log('[StockfishBridge] lichess board found immediately');
+      setupMonitoring();
+      return;
+    }
     const check = () => {
       boardEl = document.querySelector('cg-board');
       if (boardEl) {
-        cgWrap = boardEl.closest('.cg-wrap') || document.querySelector('.cg-wrap');
+        cgWrap = boardEl.closest('cg-wrap, .cg-wrap') || document.querySelector('cg-wrap, .cg-wrap');
         console.log('[StockfishBridge] lichess board found');
         setupMonitoring();
       } else {
@@ -227,13 +269,18 @@
     detectColor();
     gameActive = true;
 
-    
     const urlMatch = window.location.pathname.match(/^\/(\w{8,12})/);
     currentGameId = urlMatch ? urlMatch[1] : 'lichess-' + Date.now();
 
-    
     const tc = detectTimeControl();
     initNewGame(currentGameId, ourColor, tc.timeControl, tc.increment);
+
+    Bridge.onConnect(() => {
+      console.log('[StockfishBridge] Reconnect detected, re-initializing lichess game state...');
+      const freshTc = detectTimeControl();
+      initNewGame(currentGameId, ourColor, freshTc.timeControl, freshTc.increment);
+      sendCurrentState();
+    });
 
     
     observer = new MutationObserver(onBoardChange);
@@ -273,14 +320,14 @@
       return;
     }
     if (!cgWrap) {
-      cgWrap = document.querySelector('.cg-wrap');
+      cgWrap = (boardEl && boardEl.closest('cg-wrap, .cg-wrap')) || document.querySelector('cg-wrap, .cg-wrap');
     }
     if (cgWrap) {
       const isFlipped = cgWrap.classList.contains('orientation-black') || cgWrap.getAttribute('orientation') === 'black';
       ourColor = isFlipped ? 'black' : 'white';
     } else {
       
-      const mainBoard = document.querySelector('.board-main, main .round__app');
+      const mainBoard = document.querySelector('.main-board, .board-main, main .round__app, .round__app');
       if (mainBoard) {
         const orientation = mainBoard.querySelector('[class*="orientation-black"]');
         ourColor = orientation ? 'black' : 'white';
@@ -315,7 +362,7 @@
     pieces.forEach(el => {
       
       if (el.classList.contains('ghost') || el.classList.contains('anim') ||
-          el.classList.contains('fading')) {
+          el.classList.contains('fading') || el.classList.contains('animating')) {
         return;
       }
 
@@ -376,6 +423,24 @@
     });
 
     
+    let whiteKings = 0;
+    let blackKings = 0;
+    let totalPieces = 0;
+    for (let r = 0; r < 8; r++) {
+      for (let f = 0; f < 8; f++) {
+        if (board[r][f]) {
+          totalPieces++;
+          if (board[r][f] === 'K') whiteKings++;
+          if (board[r][f] === 'k') blackKings++;
+        }
+      }
+    }
+    // Mid-animation stability check: if kings are missing or extra pieces exist, skip this tick
+    if (whiteKings !== 1 || blackKings !== 1 || totalPieces > 32) {
+      console.warn('[StockfishBridge] Board unstable / mid-transition, skipping FEN');
+      return null;
+    }
+
     let fen = '';
     for (let r = 7; r >= 0; r--) {
       let empty = 0;
@@ -422,15 +487,23 @@
       enPassantSquare = '-';
     } else if (!boardsEqual(board, prevBoard)) {
       let epTarget = '-';
-      const filesAlgebraic = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
-      for (let f = 0; f < 8; f++) {
-        if (prevBoard[1][f] === 'P' && board[3][f] === 'P' && !board[1][f]) {
-          epTarget = filesAlgebraic[f] + '3';
-          break;
+      let diffs = 0;
+      for (let r = 0; r < 8; r++) {
+        for (let f = 0; f < 8; f++) {
+          if (prevBoard[r][f] !== board[r][f]) diffs++;
         }
-        if (prevBoard[6][f] === 'p' && board[4][f] === 'p' && !board[6][f]) {
-          epTarget = filesAlgebraic[f] + '6';
-          break;
+      }
+      if (diffs === 2) {
+        const filesAlgebraic = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+        for (let f = 0; f < 8; f++) {
+          if (prevBoard[1][f] === 'P' && board[3][f] === 'P' && !board[1][f]) {
+            epTarget = filesAlgebraic[f] + '3';
+            break;
+          }
+          if (prevBoard[6][f] === 'p' && board[4][f] === 'p' && !board[6][f]) {
+            epTarget = filesAlgebraic[f] + '6';
+            break;
+          }
         }
       }
       enPassantSquare = epTarget;
@@ -462,11 +535,7 @@
       let bTime = clocks.b;
       
       if (typeof wTime === 'number' && typeof bTime === 'number') {
-        // Assume seconds if < 100000 and not ms directly, though Lichess usually exposes seconds in window.lichess.clock
-        if (wTime > 0 && wTime < 100000 && !Number.isInteger(wTime)) {
-          wTime *= 1000;
-          bTime *= 1000;
-        } else if (wTime > 0 && wTime < 100000) {
+        if (wTime > 0 && wTime < 100000) {
           wTime *= 1000;
           bTime *= 1000;
         }
@@ -478,7 +547,30 @@
           ourTimeMs = Math.round(bTime);
           oppTimeMs = Math.round(wTime);
         }
+        return { ourTimeMs, oppTimeMs };
       }
+    }
+
+    // Robust DOM Fallback for Lichess clocks
+    try {
+      const ourClockEl = document.querySelector('.rclock-bottom, .round__side .rclock-bottom, [class*="rclock-bottom"]');
+      const oppClockEl = document.querySelector('.rclock-top, .round__side .rclock-top, [class*="rclock-top"]');
+
+      if (ourClockEl && oppClockEl) {
+        const ourTimeText = (ourClockEl.querySelector('.time, time, .rclock__time') || ourClockEl).textContent;
+        const oppTimeText = (oppClockEl.querySelector('.time, time, .rclock__time') || oppClockEl).textContent;
+        ourTimeMs = parseTimeString(ourTimeText);
+        oppTimeMs = parseTimeString(oppTimeText);
+      } else {
+        const allClocks = Array.from(document.querySelectorAll('.rclock, .round__side .rclock, .rclock .time'));
+        if (allClocks.length >= 2) {
+          const sorted = allClocks.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+          ourTimeMs = parseTimeString(sorted[0].textContent);
+          oppTimeMs = parseTimeString(sorted[sorted.length - 1].textContent);
+        }
+      }
+    } catch (e) {
+      console.warn('[StockfishBridge] Error reading lichess clocks from DOM:', e);
     }
 
     return { ourTimeMs, oppTimeMs };
@@ -488,7 +580,67 @@
     if (injectedState && injectedState.turnColor) {
       return ourColor === injectedState.turnColor;
     }
-    return false;
+
+    // 1. Robust Clock Running Fallback
+    try {
+      const bottomClock = document.querySelector('.rclock-bottom, .round__side .rclock-bottom, [class*="rclock-bottom"]');
+      const topClock = document.querySelector('.rclock-top, .round__side .rclock-top, [class*="rclock-top"]');
+      if (bottomClock) {
+        const isBottomRunning = bottomClock.classList.contains('running') ||
+          bottomClock.classList.contains('turn') ||
+          bottomClock.classList.contains('active') ||
+          bottomClock.querySelector('.running') !== null;
+        if (isBottomRunning) return true;
+      }
+      if (topClock) {
+        const isTopRunning = topClock.classList.contains('running') ||
+          topClock.classList.contains('turn') ||
+          topClock.classList.contains('active') ||
+          topClock.querySelector('.running') !== null;
+        if (isTopRunning) return false;
+      }
+    } catch (e) {}
+
+    // 2. Robust Last-Move Square Fallback on <cg-board>
+    try {
+      const lastMoveEls = Array.from(document.querySelectorAll('cg-board square.last-move, .cg-wrap square.last-move, square.last-move'));
+      if (lastMoveEls.length === 0) {
+        // Initial board state: White moves first
+        return ourColor === 'white';
+      }
+
+      // Check which last-move square has the piece that just moved
+      if (board && boardEl) {
+        const boardRect = boardEl.getBoundingClientRect();
+        const squareSize = boardRect.width / 8;
+        const isFlipped = cgWrap ? cgWrap.classList.contains('orientation-black') : false;
+
+        for (const sq of lastMoveEls) {
+          let { file, rank } = getSquareFromTransform(sq, squareSize);
+          if (file >= 0 && file < 8 && rank >= 0 && rank < 8) {
+            if (isFlipped) {
+              file = 7 - file;
+            } else {
+              rank = 7 - rank;
+            }
+            const piece = board[rank] && board[rank][file];
+            if (piece) {
+              const pieceColor = (piece === piece.toUpperCase()) ? 'w' : 'b';
+              const nextTurn = (pieceColor === 'w') ? 'black' : 'white';
+              return ourColor === nextTurn;
+            }
+          }
+        }
+      }
+    } catch (e) {}
+
+    // 3. Check turn classes on container
+    if (cgWrap) {
+      if (cgWrap.classList.contains('turn-white')) return ourColor === 'white';
+      if (cgWrap.classList.contains('turn-black')) return ourColor === 'black';
+    }
+
+    return ourColor === 'white';
   }
 
   
@@ -585,51 +737,37 @@
     const fromCoords = getSquareCenter(from, squareSize, isFlipped, boardRect);
     const toCoords = getSquareCenter(to, squareSize, isFlipped, boardRect);
 
-    
     const fromTarget = document.elementFromPoint(fromCoords.x, fromCoords.y) || boardEl;
+    const toTarget = document.elementFromPoint(toCoords.x, toCoords.y) || boardEl;
 
-    simulateMouseEvent('mousedown', fromTarget, fromCoords.x, fromCoords.y);
+    // 1. Immediate crisp Pointer & Mouse drag dispatch (sub-10ms overhead)
     simulatePointerEvent('pointerdown', fromTarget, fromCoords.x, fromCoords.y);
+    simulateMouseEvent('mousedown', fromTarget, fromCoords.x, fromCoords.y);
+    simulatePointerEvent('pointermove', boardEl, toCoords.x, toCoords.y);
+    simulateMouseEvent('mousemove', boardEl, toCoords.x, toCoords.y);
+    simulatePointerEvent('pointerup', toTarget, toCoords.x, toCoords.y);
+    simulateMouseEvent('mouseup', toTarget, toCoords.x, toCoords.y);
 
-    setTimeout(() => {
-      simulateMouseEvent('mousemove', boardEl, toCoords.x, toCoords.y);
-      simulatePointerEvent('pointermove', boardEl, toCoords.x, toCoords.y);
+    // 2. Immediate Click-to-Move fallback
+    simulateClick(fromTarget, fromCoords.x, fromCoords.y);
+    simulateClick(toTarget, toCoords.x, toCoords.y);
 
-      setTimeout(() => {
-        const toTarget = document.elementFromPoint(toCoords.x, toCoords.y) || boardEl;
-        simulateMouseEvent('mouseup', toTarget, toCoords.x, toCoords.y);
-        simulatePointerEvent('pointerup', toTarget, toCoords.x, toCoords.y);
-
-        
-        simulateTouchEvent('touchstart', fromTarget, fromCoords.x, fromCoords.y);
-        setTimeout(() => {
-          simulateTouchEvent('touchmove', boardEl, toCoords.x, toCoords.y);
-          setTimeout(() => {
-            simulateTouchEvent('touchend', toTarget, toCoords.x, toCoords.y);
-          }, 10);
-        }, 10);
-
-        
-        if (promotion) {
-          setTimeout(() => selectPromotion(promotion), 300);
-        }
-      }, 40);
-    }, 40);
+    // 3. Fast promotion selection (no artificial 300ms sleep)
+    if (promotion) {
+      selectPromotionFast(promotion);
+    }
 
     return true;
   }
 
-  
   function getSquareCenter(square, squareSize, isFlipped, boardRect) {
     const { file, rank } = squareToFileRank(square);
     let x, y;
 
     if (isFlipped) {
-      
       x = boardRect.left + (7 - file) * squareSize + squareSize / 2;
       y = boardRect.top + rank * squareSize + squareSize / 2;
     } else {
-      
       x = boardRect.left + file * squareSize + squareSize / 2;
       y = boardRect.top + (7 - rank) * squareSize + squareSize / 2;
     }
@@ -637,85 +775,99 @@
     return { x, y };
   }
 
-  
-  function selectPromotion(piece) {
+  function selectPromotionFast(piece) {
     const pieceChar = piece.toLowerCase();
-    console.log('[StockfishBridge] Selecting lichess promotion:', pieceChar);
-
-    const pieceNames = {
-      q: 'queen',
-      r: 'rook',
-      b: 'bishop',
-      n: 'knight'
-    };
+    const pieceNames = { q: 'queen', r: 'rook', b: 'bishop', n: 'knight' };
     const pieceName = pieceNames[pieceChar] || 'queen';
 
-    
     const selectors = [
-      
       `#promotion-choice piece.${pieceName}`,
       `.promotion-choice piece.${pieceName}`,
       `square > piece.${pieceName}`,
-      
       `.cg-wrap piece.${pieceName}[class*="promotion"]`,
       `piece.${pieceName}`,
+      `.promotion-piece[data-piece="${pieceChar}"]`
     ];
 
-    
-    const trySelect = (index) => {
-      if (index >= selectors.length) {
-        
-        const promoContainer = document.querySelector(
-          '#promotion-choice, .promotion-choice, cg-container [class*="promotion"]'
-        );
-        if (promoContainer) {
-          const pieces = promoContainer.querySelectorAll('piece, square');
-          
-          const orderMap = ourColor === 'black'
-            ? { b: 0, r: 1, n: 2, q: 3 }
-            : { q: 0, n: 1, r: 2, b: 3 };
-          const targetIndex = orderMap[pieceChar] !== undefined ? orderMap[pieceChar] : 0;
-          if (pieces[targetIndex]) {
-            pieces[targetIndex].click();
-            console.log('[StockfishBridge] Promotion selected by index:', targetIndex);
-          }
-        } else {
-          console.warn('[StockfishBridge] Could not find lichess promotion dialog');
-        }
-        return;
-      }
-
-      try {
-        const el = document.querySelector(selectors[index]);
+    let attempts = 0;
+    const trySelect = () => {
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
         if (el) {
-          el.click();
-          
+          simulateClick(el, 0, 0);
           simulateMouseEvent('mousedown', el, 0, 0);
           simulateMouseEvent('mouseup', el, 0, 0);
-          console.log('[StockfishBridge] Promotion selected via:', selectors[index]);
-          return;
+          console.log('[StockfishBridge] Promotion selected via:', sel);
+          return true;
         }
-      } catch (e) {
-        
       }
-      trySelect(index + 1);
+      const promoContainer = document.querySelector(
+        '#promotion-choice, .promotion-choice, cg-container [class*="promotion"]'
+      );
+      if (promoContainer) {
+        const pieces = promoContainer.querySelectorAll('piece, square');
+        const orderMap = ourColor === 'black'
+          ? { b: 0, r: 1, n: 2, q: 3 }
+          : { q: 0, n: 1, r: 2, b: 3 };
+        const targetIndex = orderMap[pieceChar] !== undefined ? orderMap[pieceChar] : 0;
+        if (pieces[targetIndex]) {
+          simulateClick(pieces[targetIndex], 0, 0);
+          console.log('[StockfishBridge] Promotion selected by index:', targetIndex);
+          return true;
+        }
+      }
+      if (++attempts < 10) {
+        setTimeout(trySelect, 5);
+      }
     };
-
-    trySelect(0);
+    trySelect();
   }
 
-  
+  function checkGameOverDOM() {
+    if (!gameActive) return;
+    try {
+      // Check Lichess result elements
+      const resultEl = document.querySelector(
+        '.result, .cg-wrap .result, .game__meta .status, .fbt.result, .game-over-modal, .round__app .result, .game__meta .status .result'
+      );
+      if (resultEl && resultEl.textContent) {
+        const text = resultEl.textContent.trim().toLowerCase();
+        let result = null;
+        if (text.includes('1-0') || text.includes('white wins') || text.includes('white is victorious')) {
+          result = '1-0';
+        } else if (text.includes('0-1') || text.includes('black wins') || text.includes('black is victorious')) {
+          result = '0-1';
+        } else if (text.includes('1/2') || text.includes('draw') || text.includes('stalemate')) {
+          result = '1/2-1/2';
+        } else if (text.length > 0 && (text.includes('resigned') || text.includes('time out') || text.includes('checkmate'))) {
+          result = text;
+        }
 
-  
+        if (result) {
+          gameActive = false;
+          Bridge.sendGameOver(result);
+          console.log('[StockfishBridge] Game over detected via DOM:', result);
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('[StockfishBridge] Error detecting game over:', e);
+    }
+  }
+
   function detectGameState() {
+    checkGameOverDOM();
+
     const gameObserver = new MutationObserver(() => {
       try {
+        checkGameOverDOM();
+
         const newBoard = document.querySelector('cg-board');
         if (newBoard && newBoard !== boardEl) {
           console.log('[StockfishBridge] New lichess board detected, re-initializing');
           cleanup();
           boardEl = newBoard;
-          cgWrap = boardEl.closest('.cg-wrap') || document.querySelector('.cg-wrap');
+          cgWrap = boardEl.closest('cg-wrap, .cg-wrap') || document.querySelector('cg-wrap, .cg-wrap');
           setupMonitoring();
         }
       } catch (e) {
@@ -727,6 +879,8 @@
       childList: true,
       subtree: true
     });
+
+    setInterval(checkGameOverDOM, 500);
   }
 
   

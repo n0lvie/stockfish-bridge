@@ -61,7 +61,24 @@ class TimeStrategy:
 
         # 2. Check Panic Mode (< 10s remaining)
         if our_time_ms < 10000:
-            return 80, 5, "Panic Mode (Clock < 10s)"
+            # Dynamic proportional time allocation based on remaining usable time and speed mode
+            if our_time_ms <= self.safety_buffer_ms:
+                usable = max(20, int(our_time_ms * 0.70))
+            else:
+                usable = our_time_ms - self.safety_buffer_ms
+
+            estimated_moves_left = max(10, min(25, 40 - move_number))
+            base_time = usable / float(estimated_moves_left)
+
+            speed_multipliers = {1: 1.3, 2: 1.0, 3: 0.7, 4: 0.4}
+            target_time = base_time * speed_multipliers.get(self.speed_mode, 1.0)
+            target_time += increment_ms * 0.8
+
+            min_time = max(30, min(50, usable))
+            max_time = max(min_time, int(usable * 0.40))
+            target_time = max(min_time, min(max_time, int(target_time)))
+
+            return int(target_time), 99, f"Panic Mode (Clock < 10s: {int(target_time)}ms)"
 
         # 3. Speed 1 (Opening, <= 6 moves)
         if move_number <= 6:
@@ -75,7 +92,8 @@ class TimeStrategy:
         # Determine remaining usable time
         usable = max(our_time_ms - self.safety_buffer_ms, 0)
         if usable <= 0:
-            return 50, 5, "Panic Mode (Safety Buffer Exceeded)"
+            target_time = max(30, min(80, int(our_time_ms * 0.20)))
+            return int(target_time), 99, "Panic Mode (Safety Buffer Exceeded)"
 
         # Base Grind calculation
         grind_time = usable / 30.0
@@ -118,9 +136,38 @@ class TimeStrategy:
         target_time = max(target_time, min(500.0, usable))
         return int(target_time), 99, "Speed 3 (Grind)"
 
-    def should_move_now(self, our_time_ms, opp_time_ms, increment_ms=0, move_number=0, last_score_cp=0, last_score_type="cp"):
+    def should_move_now(
+        self,
+        our_time_ms: int,
+        opp_time_ms: int,
+        increment_ms: int = 0,
+        move_number: int = 0,
+        last_score_cp: int = 0,
+        last_score_type: str = "cp",
+        elapsed_ms: int = 0,
+        initial_time_ms: Optional[int] = None
+    ) -> bool:
         if self.is_untimed(our_time_ms, opp_time_ms):
             return False
+
+        if our_time_ms <= 0:
+            logger.debug("should_move_now: YES – clock expired")
+            return True
+
+        init_time = initial_time_ms if initial_time_ms is not None else (our_time_ms + elapsed_ms)
+
+        # If turn started with clock already at or below safety buffer,
+        # scale down the threshold dynamically so we do not abort immediately on iteration 0.
+        if init_time <= self.safety_buffer_ms:
+            critical_threshold = max(20, int(init_time * 0.15))
+            if our_time_ms <= critical_threshold:
+                logger.debug(
+                    "should_move_now: YES – below dynamic low-clock threshold (%d ms <= %d ms)",
+                    our_time_ms, critical_threshold
+                )
+                return True
+            return False
+
         effective_remaining = our_time_ms - self.safety_buffer_ms
         if effective_remaining <= 0:
             logger.debug("should_move_now: YES – below safety buffer")

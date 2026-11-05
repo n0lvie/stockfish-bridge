@@ -86,7 +86,7 @@
   let lastSentTurn = null;
   let debounceTimer = null;
   let pollTimer = null;
-  const DEBOUNCE_MS = 80;
+  const DEBOUNCE_MS = 10;
   const CLOCK_POLL_MS = 200;
   const BOARD_POLL_MS = 10;
   const STATE_POLL_MS = 1000;
@@ -170,6 +170,12 @@
 
   
   function waitForBoard() {
+    boardEl = document.querySelector('wc-chess-board, chess-board');
+    if (boardEl) {
+      console.log('[StockfishBridge] chess.com board found immediately:', boardEl.tagName);
+      setupMonitoring();
+      return;
+    }
     const check = () => {
       boardEl = document.querySelector('wc-chess-board, chess-board');
       if (boardEl) {
@@ -187,15 +193,17 @@
     detectColor();
     gameActive = true;
 
-    
     const urlMatch = window.location.pathname.match(/\/game\/live\/(\d+)|\/game\/daily\/(\d+)/);
     currentGameId = urlMatch ? (urlMatch[1] || urlMatch[2]) : 'live-' + Date.now();
 
-    
+    // Immediately dispatch game init without waiting for asynchronous callback
+    const tc = detectTimeControl();
+    initNewGame(currentGameId, ourColor, tc.timeControl, tc.increment);
+
     Bridge.onConnect(() => {
       console.log('[StockfishBridge] Connection active, sending init and forcing state sync...');
-      const tc = detectTimeControl();
-      initNewGame(currentGameId, ourColor, tc.timeControl, tc.increment);
+      const freshTc = detectTimeControl();
+      initNewGame(currentGameId, ourColor, freshTc.timeControl, freshTc.increment);
       sendCurrentState(true);
     });
 
@@ -278,6 +286,11 @@
     const board = Array(8).fill(null).map(() => Array(8).fill(null));
 
     pieces.forEach(el => {
+      if (el.classList.contains('animating') || el.classList.contains('ghost') ||
+          el.classList.contains('hint') || el.classList.contains('captured')) {
+        return;
+      }
+
       const rawClass = getElementClassString(el);
       const classes = rawClass.split(/\s+/);
       let file = -1, rank = -1;
@@ -287,6 +300,13 @@
         if (sqMatch) {
           file = parseInt(sqMatch[1]) - 1; 
           rank = parseInt(sqMatch[2]) - 1;
+          break;
+        }
+        const sqMatchAlg = cls.match(/^square-([a-h])([1-8])$/);
+        if (sqMatchAlg) {
+          file = sqMatchAlg[1].charCodeAt(0) - 97;
+          rank = parseInt(sqMatchAlg[2]) - 1;
+          break;
         }
       }
 
@@ -297,7 +317,24 @@
       }
     });
 
-    
+    let whiteKings = 0;
+    let blackKings = 0;
+    let totalPieces = 0;
+    for (let r = 0; r < 8; r++) {
+      for (let f = 0; f < 8; f++) {
+        if (board[r][f]) {
+          totalPieces++;
+          if (board[r][f] === 'K') whiteKings++;
+          if (board[r][f] === 'k') blackKings++;
+        }
+      }
+    }
+    // Mid-animation stability check: if kings are missing or extra pieces exist, skip this tick
+    if (whiteKings !== 1 || blackKings !== 1 || totalPieces > 32) {
+      console.warn('[StockfishBridge] Chess.com board unstable / mid-animation, skipping FEN');
+      return null;
+    }
+
     let fen = '';
     for (let r = 7; r >= 0; r--) {
       let empty = 0;
@@ -343,15 +380,23 @@
       enPassantSquare = '-';
     } else if (!boardsEqual(board, prevBoard)) {
       let epTarget = '-';
-      const filesAlgebraic = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
-      for (let f = 0; f < 8; f++) {
-        if (prevBoard[1][f] === 'P' && board[3][f] === 'P' && !board[1][f]) {
-          epTarget = filesAlgebraic[f] + '3';
-          break;
+      let diffs = 0;
+      for (let r = 0; r < 8; r++) {
+        for (let f = 0; f < 8; f++) {
+          if (prevBoard[r][f] !== board[r][f]) diffs++;
         }
-        if (prevBoard[6][f] === 'p' && board[4][f] === 'p' && !board[6][f]) {
-          epTarget = filesAlgebraic[f] + '6';
-          break;
+      }
+      if (diffs === 2) {
+        const filesAlgebraic = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+        for (let f = 0; f < 8; f++) {
+          if (prevBoard[1][f] === 'P' && board[3][f] === 'P' && !board[1][f]) {
+            epTarget = filesAlgebraic[f] + '3';
+            break;
+          }
+          if (prevBoard[6][f] === 'p' && board[4][f] === 'p' && !board[6][f]) {
+            epTarget = filesAlgebraic[f] + '6';
+            break;
+          }
         }
       }
       enPassantSquare = epTarget;
@@ -601,41 +646,29 @@
     const fromCoords = getSquareCenter(from, squareSize, isFlipped, rect);
     const toCoords = getSquareCenter(to, squareSize, isFlipped, rect);
 
-    
     const targetElement = document.elementFromPoint(fromCoords.x, fromCoords.y) || boardEl;
+    const toTarget = document.elementFromPoint(toCoords.x, toCoords.y) || boardEl;
 
-    
+    // 1. Immediate crisp Pointer & Mouse drag dispatch (sub-10ms overhead)
     simulatePointerEvent('pointerdown', targetElement, fromCoords.x, fromCoords.y);
     simulateMouseEvent('mousedown', targetElement, fromCoords.x, fromCoords.y);
+    simulatePointerEvent('pointermove', boardEl, toCoords.x, toCoords.y);
+    simulateMouseEvent('mousemove', boardEl, toCoords.x, toCoords.y);
+    simulatePointerEvent('pointerup', toTarget, toCoords.x, toCoords.y);
+    simulateMouseEvent('mouseup', toTarget, toCoords.x, toCoords.y);
 
-    setTimeout(() => {
-      simulatePointerEvent('pointermove', boardEl, toCoords.x, toCoords.y);
-      simulateMouseEvent('mousemove', boardEl, toCoords.x, toCoords.y);
+    // 2. Immediate Click-to-Move fallback
+    simulateClick(targetElement, fromCoords.x, fromCoords.y);
+    simulateClick(toTarget, toCoords.x, toCoords.y);
 
-      setTimeout(() => {
-        simulatePointerEvent('pointerup', boardEl, toCoords.x, toCoords.y);
-        simulateMouseEvent('mouseup', boardEl, toCoords.x, toCoords.y);
-
-        
-        simulateTouchEvent('touchstart', targetElement, fromCoords.x, fromCoords.y);
-        setTimeout(() => {
-          simulateTouchEvent('touchmove', boardEl, toCoords.x, toCoords.y);
-          setTimeout(() => {
-            simulateTouchEvent('touchend', boardEl, toCoords.x, toCoords.y);
-          }, 10);
-        }, 10);
-
-        
-        if (promotion) {
-          setTimeout(() => selectPromotion(promotion), 250);
-        }
-      }, 30);
-    }, 30);
+    // 3. Fast promotion selection (no artificial 250ms sleep)
+    if (promotion) {
+      selectPromotionFast(promotion);
+    }
 
     return true;
   }
 
-  
   function getSquareCenter(square, squareSize, isFlipped, boardRect) {
     const { file, rank } = squareToFileRank(square);
     let x, y;
@@ -651,20 +684,16 @@
     return { x, y };
   }
 
-  
-  function selectPromotion(piece) {
+  function selectPromotionFast(piece) {
     const pieceChar = piece.toLowerCase();
     console.log('[StockfishBridge] Selecting promotion:', pieceChar);
 
-    
     const selectors = [
-      
       `[data-cy="promotion-piece-${pieceChar}"]`,
       `.promotion-piece[data-piece="${pieceChar}"]`,
       `.promotion-piece.w${pieceChar}, .promotion-piece.b${pieceChar}`,
     ];
 
-    
     const pieceNames = { q: 'queen', r: 'rook', b: 'bishop', n: 'knight' };
     const pieceName = pieceNames[pieceChar];
     if (pieceName) {
@@ -672,29 +701,37 @@
       selectors.push(`.promotion-area [class*="${pieceChar}"]`);
     }
 
-    for (const selector of selectors) {
-      try {
-        const el = document.querySelector(selector);
-        if (el) {
-          el.click();
-          console.log('[StockfishBridge] Promotion selected via:', selector);
-          return;
+    let attempts = 0;
+    const trySelect = () => {
+      for (const selector of selectors) {
+        try {
+          const el = document.querySelector(selector);
+          if (el) {
+            simulateClick(el, 0, 0);
+            simulateMouseEvent('mousedown', el, 0, 0);
+            simulateMouseEvent('mouseup', el, 0, 0);
+            console.log('[StockfishBridge] Promotion selected via:', selector);
+            return true;
+          }
+        } catch (e) {
+          continue;
         }
-      } catch (e) {
-        continue;
       }
-    }
 
-    
-    const firstPromo = document.querySelector(
-      '.promotion-piece, [class*="promotion-option"]'
-    );
-    if (firstPromo) {
-      firstPromo.click();
-      console.log('[StockfishBridge] Promotion fallback: clicked first option');
-    } else {
-      console.warn('[StockfishBridge] Could not find promotion dialog');
-    }
+      const firstPromo = document.querySelector(
+        '.promotion-piece, [class*="promotion-option"]'
+      );
+      if (firstPromo) {
+        simulateClick(firstPromo, 0, 0);
+        console.log('[StockfishBridge] Promotion fallback: clicked first option');
+        return true;
+      }
+
+      if (++attempts < 10) {
+        setTimeout(trySelect, 5);
+      }
+    };
+    trySelect();
   }
 
   

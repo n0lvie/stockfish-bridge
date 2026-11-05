@@ -17,28 +17,31 @@ const Bridge = {
   _moveNumber: 0,
   _makeMoveCallback: null,
   _debounceTimer: null,
-  _STATE_DEBOUNCE_MS: 100,
+  _STATE_DEBOUNCE_MS: 10,
   _connectCallback: null,
+  _lastClockSent: { ourTimeMs: 0, oppTimeMs: 0, time: 0 },
 
-  
   init(site) {
     this._site = site;
     console.log('[StockfishBridge] Initializing for', site);
 
-    
-    chrome.runtime.sendMessage(
-      { target: 'background', type: 'register', site },
-      (response) => {
-        if (chrome.runtime.lastError) {
-          console.error('[StockfishBridge] Registration error:', chrome.runtime.lastError.message);
-          return;
+    try {
+      chrome.runtime.sendMessage(
+        { target: 'background', type: 'register', site },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn('[StockfishBridge] Registration error:', chrome.runtime.lastError.message);
+            return;
+          }
+          this._registered = true;
+          this._autoPlay = response?.autoPlay !== undefined ? response.autoPlay : true;
+          console.log('[StockfishBridge] Registered, server connected:', response?.connected, 'autoPlay:', this._autoPlay);
+          this.setConnected(response?.connected || false);
         }
-        this._registered = true;
-        this._autoPlay = response?.autoPlay !== undefined ? response.autoPlay : true;
-        console.log('[StockfishBridge] Registered, server connected:', response?.connected, 'autoPlay:', this._autoPlay);
-        this.setConnected(response?.connected || false);
-      }
-    );
+      );
+    } catch (e) {
+      console.warn('[StockfishBridge] Registration send failed:', e);
+    }
 
     
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -126,14 +129,18 @@ const Bridge = {
 
   onConnect(fn) {
     this._connectCallback = fn;
-    chrome.runtime.sendMessage(
-      { target: 'background', type: 'register', site: this._site },
-      (response) => {
-        if (response && response.connected) {
-          try { fn(); } catch(e) {}
+    try {
+      chrome.runtime.sendMessage(
+        { target: 'background', type: 'register', site: this._site },
+        (response) => {
+          if (response && response.connected) {
+            try { fn(); } catch(e) {}
+          }
         }
-      }
-    );
+      );
+    } catch (e) {
+      console.warn('[StockfishBridge] onConnect registration send failed:', e);
+    }
   },
 
   
@@ -177,11 +184,19 @@ const Bridge = {
 
   
   sendClockUpdate(ourTimeMs, oppTimeMs) {
+    const now = Date.now();
+    const last = this._lastClockSent;
+    // Throttle: send if either clock differs by >= 100ms or 1s elapsed
+    if (last && Math.abs(ourTimeMs - last.ourTimeMs) < 100 && Math.abs(oppTimeMs - last.oppTimeMs) < 100 && (now - last.time) < 1000) {
+      return;
+    }
+    this._lastClockSent = { ourTimeMs, oppTimeMs, time: now };
+
     this.sendToServer({
       type: 'clock',
       ourTimeMs,
       oppTimeMs,
-      timestamp: Date.now()
+      timestamp: now
     });
   },
 
@@ -702,6 +717,27 @@ function simulateTouchEvent(type, target, x, y) {
   } catch (e) {
     
     console.warn('[StockfishBridge] TouchEvent simulation not supported:', e.message);
+  }
+}
+
+function simulateClick(target, x, y) {
+  if (!target) return;
+  try {
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX: x !== undefined ? x : 0,
+      clientY: y !== undefined ? y : 0,
+      screenX: x !== undefined ? x : 0,
+      screenY: y !== undefined ? y : 0,
+      button: 0,
+      buttons: 0
+    });
+    target.dispatchEvent(event);
+  } catch (e) {
+    if (typeof target.click === 'function') target.click();
   }
 }
 

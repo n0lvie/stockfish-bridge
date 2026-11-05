@@ -23,14 +23,13 @@ def test_tier4_complete_game_simulated_chess_com(mock_board_page):
     assert len(state_msgs) > 0
     assert state_msgs[-1]['fen'].startswith('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR')
     
-    # 2. Simulate moves (e2e4)
-    page.evaluate("window.sendMockServerMessage({ type: 'move', uci: 'e2e4' });")
+    # 2. Simulate move (e2e4)
+    page.evaluate("window.sendMockServerMessage({ type: 'move', uci: 'e2e4', autoPlay: true });")
     page.wait_for_timeout(500)
     
-    # Check board update (we manually update mock board to reflect move)
-    pieces_html = pieces_html.replace('square-52', 'square-54')
-    page.evaluate(f"document.querySelector('wc-chess-board').innerHTML = `{pieces_html}`;")
-    page.wait_for_timeout(500)
+    # Check piece moved in DOM
+    e4_piece = page.evaluate("document.querySelector('.piece.square-54, .piece.square-e4') !== null")
+    assert e4_piece is True, "Piece did not move to e4 via event handlers"
     
     messages = page.evaluate("window.getMockMessages();")
     state_msgs = [m.get('data') for m in messages if 'data' in m and m['data'].get('type') == 'state']
@@ -46,6 +45,58 @@ def test_tier4_complete_game_simulated_chess_com(mock_board_page):
     assert go_msgs[-1]['result'] == '1-0'
 
 
+def test_tier4_complete_game_simulated_lichess(mock_lichess_page):
+    """
+    Tier 4: Complete game on simulated Lichess board.
+    Test FEN extraction, move execution via transform/cgKey, and game over.
+    """
+    page = mock_lichess_page
+    page.wait_for_timeout(500)
+
+    # 1. Start game verification
+    messages = page.evaluate("window.getMockMessages();")
+    init_msgs = [m.get('data') for m in messages if 'data' in m and m['data'].get('type') == 'init']
+    assert len(init_msgs) > 0
+    assert init_msgs[-1]['color'] == 'white'
+
+    state_msgs = [m.get('data') for m in messages if 'data' in m and m['data'].get('type') == 'state']
+    assert len(state_msgs) > 0
+    assert state_msgs[-1]['fen'].startswith('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR')
+
+    # 2. Simulate move (e2e4)
+    page.evaluate("window.sendMockServerMessage({ type: 'move', uci: 'e2e4', autoPlay: true });")
+    page.wait_for_timeout(500)
+
+    # Check piece moved to e4 on Lichess
+    e4_piece_exists = page.evaluate("""() => {
+        const pieces = document.querySelectorAll('piece');
+        for (const p of pieces) {
+            if (p.getAttribute('cg-key') === 'e4' || p.cgKey === 'e4') return true;
+        }
+        return false;
+    }""")
+    assert e4_piece_exists is True, "Piece did not move to e4 on Lichess"
+
+    # Verify clock turn switched
+    top_running = page.evaluate("document.querySelector('#top-clock').classList.contains('running')")
+    assert top_running is True, "Clock did not switch to opponent after move"
+
+    # 3. Simulate game over
+    page.evaluate("""
+        const modal = document.createElement('div');
+        modal.className = 'cg-wrap';
+        const result = document.createElement('div');
+        result.className = 'result';
+        result.textContent = '1-0';
+        modal.appendChild(result);
+        document.body.appendChild(modal);
+    """)
+    page.wait_for_timeout(500)
+    messages = page.evaluate("window.getMockMessages();")
+    go_msgs = [m.get('data') for m in messages if 'data' in m and m['data'].get('type') == 'game_over']
+    assert len(go_msgs) > 0
+
+
 def test_tier4_time_scramble(mock_board_page):
     """
     Tier 4: Time scramble (fast clock updates).
@@ -58,7 +109,8 @@ def test_tier4_time_scramble(mock_board_page):
     script = """
         for (let i = 0; i < 10; i++) {
             setTimeout(() => {
-                document.querySelector('.clock-bottom').textContent = `00:0${9-i}.${i}`;
+                const el = document.querySelector('.clock-bottom .time') || document.querySelector('.clock-bottom');
+                if (el) el.textContent = `00:0${9-i}.${i}`;
             }, i * 100);
         }
     """
@@ -67,34 +119,30 @@ def test_tier4_time_scramble(mock_board_page):
     
     messages = page.evaluate("window.getMockMessages();")
     clock_msgs = [m.get('data') for m in messages if 'data' in m and m['data'].get('type') == 'clock']
-    # Shouldn't be 100 messages, but enough to track
     assert len(clock_msgs) > 0
-    # Final clock should be around 00:00
     assert clock_msgs[-1]['ourTimeMs'] < 1000
+
 
 def test_tier4_disconnect_reconnect_recovery(mock_board_page):
     """
     Tier 4: Disconnect & Reconnect recovery.
     """
     page = mock_board_page
+    page.wait_for_timeout(300)
     
-    # Disconnect
-    page.evaluate("window.chrome.runtime.sendMessage = function() { throw new Error('Disconnected'); };")
-    page.wait_for_timeout(500)
+    # Signal disconnect
+    page.evaluate("window.sendMockServerMessage({ type: 'connected', connected: false });")
+    page.wait_for_timeout(200)
+    page.evaluate("window.getMockMessages();")
     
     # Reconnect
-    page.evaluate("""
-        window.chrome.runtime.sendMessage = function(msg, callback) {
-            window._mockMessages.push(msg);
-            if (callback) setTimeout(() => callback({ connected: true, autoPlay: true }), 0);
-        };
-        window.sendMockServerMessage({ type: 'connected', connected: true });
-    """)
+    page.evaluate("window.sendMockServerMessage({ type: 'connected', connected: true });")
     page.wait_for_timeout(500)
     
     messages = page.evaluate("window.getMockMessages();")
     init_msgs = [m.get('data') for m in messages if 'data' in m and m['data'].get('type') == 'init']
     assert len(init_msgs) > 0, "System did not recover and send init on reconnect"
+
 
 def test_tier4_unknown_board_layout_fallback(mock_board_page):
     """

@@ -3,6 +3,7 @@ import sys
 import socket
 import subprocess
 import shutil
+import argparse
 
 if hasattr(sys.stdout, 'reconfigure'):
     try:
@@ -50,41 +51,64 @@ def check_and_install_dependencies():
 def detect_termux():
     return "com.termux" in sys.executable or os.path.exists("/data/data/com.termux")
 
-def check_and_install_stockfish():
+def check_and_install_stockfish(allow_mock=False):
     log("Проверка наличия шахматного движка Stockfish...")
-    stockfish_path = shutil.which("stockfish")
-    
-    if stockfish_path:
-        log_success(f"Stockfish найден: {stockfish_path}")
-        return
 
-    log_warn("Stockfish не найден в системном PATH.")
+    server_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server")
+    bin_name = "stockfish.exe" if sys.platform == "win32" else "stockfish"
+    local_bin = os.path.join(server_dir, "bin", bin_name)
+
+    # 1. Check local bin/ directory
+    if os.path.exists(local_bin):
+        log_success(f"Stockfish найден в локальной папке bin: {local_bin}")
+        return local_bin
+
+    # 2. Check system PATH
+    stockfish_path = shutil.which("stockfish")
+    if stockfish_path:
+        log_success(f"Stockfish найден в системном PATH: {stockfish_path}")
+        return stockfish_path
+
+    # 3. Check via config.find_stockfish
+    try:
+        if server_dir not in sys.path:
+            sys.path.insert(0, server_dir)
+        import config
+        discovered = config.find_stockfish()
+        if discovered:
+            log_success(f"Stockfish обнаружен по стандартному пути: {discovered}")
+            return discovered
+    except Exception:
+        pass
+
+    log_warn("Stockfish не найден на системе. Попытка автоматической загрузки...")
 
     if detect_termux():
         log("Обнаружена среда Termux. Попытка автоматической установки Stockfish...")
         try:
-                                                      
             subprocess.check_call(["pkg", "install", "-y", "stockfish"])
-            log_success("Stockfish успешно установлен в Termux!")
-            return
+            termux_sf = shutil.which("stockfish")
+            if termux_sf:
+                log_success("Stockfish успешно установлен в Termux!")
+                return termux_sf
         except Exception as e:
             log_error(f"Не удалось установить Stockfish через pkg: {e}")
-            log("Попробуйте выполнить вручную: pkg install stockfish")
-    else:
-                                      
-        if sys.platform.startswith("linux"):
-            log("Для установки Stockfish введите в терминале:")
-            log("  sudo apt update && sudo apt install stockfish  (для Debian/Ubuntu)")
-            log("  sudo dnf install stockfish                     (для Fedora)")
-        elif sys.platform == "darwin":
-            log("Для установки на macOS используйте Homebrew:")
-            log("  brew install stockfish")
-        elif sys.platform == "win32":
-            log("Для Windows:")
-            log("  1. Скачайте Stockfish с официального сайта: https://stockfishchess.org/download/")
-            log("  2. Поместите stockfish.exe в папку 'server' или добавьте в переменные среды PATH.")
 
-    log_warn("Продолжаем запуск. Если движок не будет найден, сервер сообщит об ошибке.")
+    try:
+        import downloader
+        downloaded = downloader.setup_stockfish()
+        if downloaded and os.path.exists(downloaded):
+            log_success(f"Stockfish успешно скачан и проверен: {downloaded}")
+            return downloaded
+    except Exception as e:
+        log_warn(f"Автоматическая загрузка недоступна: {e}")
+
+    if allow_mock:
+        log_warn("Работа в автономном режиме: используется тестовый/mock-движок (--mock).")
+        return "mock_stockfish"
+
+    log_warn("Движок не найден. При отсутствии сети можно запустить сервер с флагом --mock.")
+    return None
 
 def get_local_ips():
     ips = ["127.0.0.1"]
@@ -107,47 +131,83 @@ def get_local_ips():
                 ips.append(ip)
     except Exception:
         pass
-        
+
     return ips
 
 def main():
+    parser = argparse.ArgumentParser(description="Stockfish Chess Bridge – Auto-Launcher", add_help=False)
+    parser.add_argument("--port", type=int, default=9999)
+    parser.add_argument("--host", type=str, default="0.0.0.0")
+    parser.add_argument("--stockfish-path", type=str, default=None)
+    parser.add_argument("--threads", type=int, default=None)
+    parser.add_argument("--hash", "--hash-mb", dest="hash", type=int, default=None)
+    parser.add_argument("--multipv", "--multi-pv", dest="multi_pv", type=int, default=None)
+    parser.add_argument("--syzygy", "--syzygy-path", dest="syzygy_path", type=str, default=None)
+    parser.add_argument("--safety-buffer", type=int, default=2000)
+    parser.add_argument("--log-level", type=str, default="INFO")
+    parser.add_argument("--mock", action="store_true", help="Fallback to mock engine if Stockfish is missing")
+    parser.add_argument("-h", "--help", action="store_true", help="Show help message")
+
+    parsed, unknown = parser.parse_known_args()
+
+    if parsed.help:
+        print("Stockfish Chess Bridge – Launcher")
+        print("Usage: python start.py [options]")
+        print("Options:")
+        print("  --port PORT                  WebSocket port (default: 9999)")
+        print("  --host HOST                  Bind host (default: 0.0.0.0)")
+        print("  --stockfish-path PATH        Path to Stockfish binary")
+        print("  --threads THREADS            UCI Threads count")
+        print("  --hash HASH_MB               UCI Hash size in MB")
+        print("  --multipv N                  UCI MultiPV count (default: 1)")
+        print("  --syzygy PATH                Path to Syzygy endgame tablebases")
+        print("  --mock                       Run in mock engine mode (offline)")
+        print("  --safety-buffer MS           Clock safety buffer in ms (default: 2000)")
+        print("  --log-level LEVEL            Logging level (DEBUG, INFO, WARNING, ERROR)")
+        return
+
     print("=" * 60)
     print("      Stockfish Chess Bridge – Автоматический Запуск")
     print("=" * 60)
 
     check_and_install_dependencies()
 
-    check_and_install_stockfish()
+    sf_path = parsed.stockfish_path or check_and_install_stockfish(allow_mock=parsed.mock)
 
     ips = get_local_ips()
-    port = 9999
-    
+    port = parsed.port
+
     print("-" * 60)
     log_success("Настройка завершена! Сервер готов к запуску.")
-    
+
     print("\nАдреса для подключения в расширении Chrome:")
     for ip in ips:
         print(f"  ws://{ip}:{port}")
-        
+
     print("\nПанель управления (Web Dashboard):")
     print(f"  http://localhost:{port}/index.html (на ПК)")
     if len(ips) > 1:
         print(f"  http://{ips[-1]}:{port}/index.html (на других устройствах)")
-    
+
     print()
     log_warn("Если вы играете на ПК, а сервер запущен на телефоне (в Termux),")
     log_warn(f"введите адрес 'ws://{ips[-1] if len(ips) > 1 else 'IP_ТЕЛЕФОНА'}:{port}' в настройках расширения.")
     print("-" * 60)
 
     server_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server")
-    
+
     log("Запуск сервера bridge.py...")
     try:
-                                                
         os.chdir(server_dir)
-        sys.path.insert(0, server_dir)
+        if server_dir not in sys.path:
+            sys.path.insert(0, server_dir)
         import bridge
-        bridge.main()
+
+        # Pass CLI arguments to bridge.main
+        forward_args = list(sys.argv[1:])
+        if sf_path and "--stockfish-path" not in forward_args:
+            forward_args.extend(["--stockfish-path", sf_path])
+        bridge.main(forward_args)
     except KeyboardInterrupt:
         print("\nРабота завершена.")
     except Exception as e:
