@@ -23,7 +23,6 @@ if hasattr(sys.stdout, "reconfigure"):
 REQUIRED_PACKAGES = {
     "websockets": "websockets",
     "psutil": "psutil",
-    "chess": "chess",
     "mss": "mss",
     "numpy": "numpy",
     "PIL": "pillow",
@@ -45,9 +44,6 @@ def ensure_dependencies():
 ensure_dependencies()
 
 import psutil
-import chess
-import chess.variant
-import chess.polyglot
 import websockets
 from websockets.asyncio.server import serve as ws_serve
 
@@ -61,71 +57,130 @@ except Exception:
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 ENGINES_DIR = os.path.join(ROOT_DIR, "engines")
-BOOKS_DIR = os.path.join(ROOT_DIR, "books")
 SYZYGY_DIR = os.path.join(ROOT_DIR, "syzygy")
 CONFIG_PATH = os.path.join(ROOT_DIR, "config.json")
 
-for _d in (ENGINES_DIR, BOOKS_DIR, SYZYGY_DIR):
+STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+START_BOARD_PART = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
+
+for _d in (ENGINES_DIR, SYZYGY_DIR):
     os.makedirs(_d, exist_ok=True)
 
 
-def sanitize_fen(fen_str: str) -> str:
-    parts = fen_str.strip().split()
-    if len(parts) < 2:
-        return fen_str
-    board_part = parts[0]
-    turn = parts[1] if parts[1] in ("w", "b") else "w"
-    castling = parts[2] if len(parts) > 2 else "KQkq"
-    ep = parts[3] if len(parts) > 3 else "-"
-    rest = parts[4:] if len(parts) > 4 else ["0", "1"]
-
-    b = chess.Board(None)
-    try:
-        b.set_board_fen(board_part)
-    except Exception:
-        return fen_str
-
-    valid_castling = ""
-    if "K" in castling and b.piece_at(chess.E1) == chess.Piece(chess.KING, chess.WHITE) and b.piece_at(chess.H1) == chess.Piece(chess.ROOK, chess.WHITE):
-        valid_castling += "K"
-    if "Q" in castling and b.piece_at(chess.E1) == chess.Piece(chess.KING, chess.WHITE) and b.piece_at(chess.A1) == chess.Piece(chess.ROOK, chess.WHITE):
-        valid_castling += "Q"
-    if "k" in castling and b.piece_at(chess.E8) == chess.Piece(chess.KING, chess.BLACK) and b.piece_at(chess.H8) == chess.Piece(chess.ROOK, chess.BLACK):
-        valid_castling += "k"
-    if "q" in castling and b.piece_at(chess.E8) == chess.Piece(chess.KING, chess.BLACK) and b.piece_at(chess.A8) == chess.Piece(chess.ROOK, chess.BLACK):
-        valid_castling += "q"
-
-    if ep != "-":
-        try:
-            ep_sq = chess.parse_square(ep)
-            b.ep_square = ep_sq
-        except Exception:
-            ep = "-"
-
-    return " ".join([board_part, turn, valid_castling or "-", ep] + rest)
+def rc_to_sq(r, c):
+    return chr(97 + c) + str(8 - r)
 
 
-def parse_pace_spec(spec_str):
-    s = str(spec_str).strip().lower()
-    scale = 1.0
-    time_ms = 0
-    depth = 0
-    for tok in s.split():
-        if tok.startswith("d") and tok[1:].isdigit():
-            depth = max(1, int(tok[1:]))
-        elif tok.endswith("ms") and tok[:-2].replace(".", "", 1).isdigit():
-            time_ms = max(10, int(float(tok[:-2])))
-        elif tok.endswith("s") and not tok.endswith("ms") and tok[:-1].replace(".", "", 1).isdigit():
-            time_ms = max(10, int(float(tok[:-1]) * 1000))
-        elif tok.endswith("x") and tok[:-1].replace(".", "", 1).isdigit():
-            scale = max(0.05, min(10.0, float(tok[:-1])))
-        elif tok.replace(".", "", 1).isdigit():
-            val = float(tok)
-            if val <= 10.0:
-                scale = max(0.05, min(10.0, val))
+def sq_to_rc(sq):
+    return 8 - int(sq[1]), ord(sq[0]) - 97
+
+
+def fen_to_grid(fen):
+    board_part = fen.strip().split()[0]
+    grid = []
+    for row_str in board_part.split("/"):
+        row = []
+        for ch in row_str:
+            if ch.isdigit():
+                row.extend(["."] * int(ch))
             else:
-                time_ms = int(val)
-    return scale, time_ms, depth
+                row.append(ch)
+        grid.append((row + ["."] * 8)[:8])
+    while len(grid) < 8:
+        grid.append(["."] * 8)
+    return grid[:8]
+
+
+def grid_to_board_fen(grid):
+    rows = []
+    for r in range(8):
+        s = ""
+        empty = 0
+        for c in range(8):
+            ch = grid[r][c]
+            if ch == ".":
+                empty += 1
+            else:
+                if empty > 0:
+                    s += str(empty)
+                    empty = 0
+                s += ch
+        if empty > 0:
+            s += str(empty)
+        rows.append(s)
+    return "/".join(rows)
+
+
+def apply_uci_to_fen(fen, uci):
+    if not uci or len(uci) < 4:
+        return fen
+    parts = fen.strip().split()
+    turn = parts[1] if len(parts) > 1 else "w"
+    grid = fen_to_grid(fen)
+    fr, fc = sq_to_rc(uci[:2])
+    tr, tc = sq_to_rc(uci[2:4])
+    piece = grid[fr][fc]
+    if piece == ".":
+        return fen
+    grid[fr][fc] = "."
+    if piece.lower() == "p" and fc != tc and grid[tr][tc] == ".":
+        grid[fr][tc] = "."
+    if piece.lower() == "k" and abs(tc - fc) == 2:
+        if tc == 6:
+            grid[fr][5] = grid[fr][7]
+            grid[fr][7] = "."
+        elif tc == 2:
+            grid[fr][3] = grid[fr][0]
+            grid[fr][0] = "."
+    if len(uci) > 4:
+        promo = uci[4].upper() if turn == "w" else uci[4].lower()
+        grid[tr][tc] = promo
+    else:
+        grid[tr][tc] = piece
+    next_turn = "b" if turn == "w" else "w"
+    return f"{grid_to_board_fen(grid)} {next_turn} KQkq - 0 1"
+
+
+def diff_fen_move(old_fen, new_fen):
+    g1 = fen_to_grid(old_fen)
+    g2 = fen_to_grid(new_fen)
+    if g1 == g2:
+        return None
+    if g1[7][4] == "K" and g2[7][4] == ".":
+        if g2[7][6] == "K" and g2[7][5] == "R":
+            return "e1g1"
+        if g2[7][2] == "K" and g2[7][3] == "R":
+            return "e1c1"
+    if g1[0][4] == "k" and g2[0][4] == ".":
+        if g2[0][6] == "k" and g2[0][5] == "r":
+            return "e8g8"
+        if g2[0][2] == "k" and g2[0][3] == "r":
+            return "e8c8"
+
+    parts = old_fen.strip().split()
+    turn = parts[1] if len(parts) > 1 else "w"
+    is_white = turn == "w"
+    changed = [(r, c) for r in range(8) for c in range(8) if g1[r][c] != g2[r][c]]
+
+    from_sq = [
+        (r, c)
+        for (r, c) in changed
+        if g2[r][c] == "." and (g1[r][c].isupper() if is_white else g1[r][c].islower())
+    ]
+    to_sq = [
+        (r, c)
+        for (r, c) in changed
+        if g2[r][c] != "." and (g2[r][c].isupper() if is_white else g2[r][c].islower())
+    ]
+
+    if len(from_sq) == 1 and len(to_sq) == 1:
+        fr, fc = from_sq[0]
+        tr, tc = to_sq[0]
+        moved = g1[fr][fc]
+        landed = g2[tr][tc]
+        promo = landed.lower() if (moved.lower() == "p" and landed.lower() != "p") else ""
+        return rc_to_sq(fr, fc) + rc_to_sq(tr, tc) + promo
+    return None
 
 
 class ConfigManager:
@@ -138,13 +193,9 @@ class ConfigManager:
             "port": 9999,
             "mode": "auto",
             "autoplay": True,
-            "pace": "1.0x",
             "mouse_action": "drag",
             "mouse_speed": "instant",
             "cv_fps": 25,
-            "use_book": True,
-            "book_max_ply": 36,
-            "book_path": os.path.join("books", "gm2600.bin"),
             "syzygy_profile": "4men",
             "engine_path": os.path.join("engines", f"stockfish{ext}"),
             "stockfish_uci": {
@@ -176,6 +227,8 @@ class ConfigManager:
             merged = dict(defaults)
             banned = {"skill level", "uci_limitstrength", "uci_elo", "contempt", "multipv"}
             for k, v in data.items():
+                if k not in defaults:
+                    continue
                 if k == "stockfish_uci" and isinstance(v, dict):
                     uci_merged = dict(defaults["stockfish_uci"])
                     for uk, uv in v.items():
@@ -198,13 +251,6 @@ class ConfigManager:
 
 
 class AssetManager:
-    BOOK_MIRRORS = [
-        ("gm2600.bin", "https://raw.githubusercontent.com/gmcheems/chess-books/main/gm2600.bin"),
-        ("Performance.bin", "https://raw.githubusercontent.com/gmcheems/chess-books/main/Performance.bin"),
-        ("titans.bin", "https://raw.githubusercontent.com/official-stockfish/books/master/titans.bin"),
-        ("book.bin", "https://raw.githubusercontent.com/niklasf/python-chess/master/data/polyglot/performance.bin"),
-    ]
-
     SYZYGY_BASE_URL = "https://tablebases.lichess.ovh/tables/standard/3-4-5/"
 
     @staticmethod
@@ -232,55 +278,6 @@ class AssetManager:
                             continue
                         names.add(f"K{w_str}vK{b_str}")
         return sorted(names)
-
-    @staticmethod
-    def verify_polyglot_book(path):
-        if not path or not os.path.isfile(path):
-            return False
-        size = os.path.getsize(path)
-        if size < 160 or size % 16 != 0:
-            return False
-        try:
-            with chess.polyglot.open_reader(path) as reader:
-                _ = list(reader.find_all(chess.Board()))
-            return True
-        except Exception:
-            return False
-
-    @classmethod
-    def ensure_opening_book(cls, preferred_path=None):
-        if preferred_path:
-            full = preferred_path if os.path.isabs(preferred_path) else os.path.join(ROOT_DIR, preferred_path)
-            if cls.verify_polyglot_book(full):
-                return full
-
-        for item in os.listdir(BOOKS_DIR):
-            if item.lower().endswith(".bin"):
-                cand = os.path.join(BOOKS_DIR, item)
-                if cls.verify_polyglot_book(cand):
-                    return cand
-
-        target = os.path.join(BOOKS_DIR, "gm2600.bin")
-        for name, url in cls.BOOK_MIRRORS:
-            tmp_path = os.path.join(BOOKS_DIR, f"_{name}.tmp")
-            try:
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=25) as resp, open(tmp_path, "wb") as f:
-                    shutil.copyfileobj(resp, f)
-                if cls.verify_polyglot_book(tmp_path):
-                    if os.path.exists(target):
-                        os.remove(target)
-                    shutil.move(tmp_path, target)
-                    return target
-            except Exception:
-                pass
-            finally:
-                if os.path.exists(tmp_path):
-                    try:
-                        os.remove(tmp_path)
-                    except Exception:
-                        pass
-        return None
 
     @classmethod
     def count_local_syzygy(cls):
@@ -350,29 +347,6 @@ class AssetManager:
         sys.stdout.write("\n")
         rtbw, rtbz, _ = cls.count_local_syzygy()
         return rtbw + rtbz
-
-    @staticmethod
-    def query_book_move(book_path, board: chess.Board):
-        if not book_path or not os.path.isfile(book_path):
-            return None, None
-        try:
-            with chess.polyglot.open_reader(book_path) as reader:
-                entries = sorted(reader.find_all(board), key=lambda e: e.weight, reverse=True)
-                if not entries:
-                    return None, None
-                best_move = entries[0].move
-                if best_move not in board.legal_moves:
-                    return None, None
-
-                ponder_move = None
-                b_copy = board.copy()
-                b_copy.push(best_move)
-                opp_entries = sorted(reader.find_all(b_copy), key=lambda e: e.weight, reverse=True)
-                if opp_entries and opp_entries[0].move in b_copy.legal_moves:
-                    ponder_move = opp_entries[0].move
-                return best_move.uci(), (ponder_move.uci() if ponder_move else None)
-        except Exception:
-            return None, None
 
 
 class EngineDownloader:
@@ -566,7 +540,6 @@ class UCIEngine:
 
         self.is_thinking = False
         self.is_pondering = False
-        self.ponder_auxiliary = False
         self.ponder_move_uci = None
         self.best_move = None
         self.ponder_reply = None
@@ -628,7 +601,6 @@ class UCIEngine:
             self._reader_task.cancel()
         self.is_thinking = False
         self.is_pondering = False
-        self.ponder_auxiliary = False
 
     async def _send(self, line):
         if self.proc and self.proc.stdin and self.alive:
@@ -678,7 +650,6 @@ class UCIEngine:
             return
         self._ignore_next_bestmove = True
         self.is_pondering = False
-        self.ponder_auxiliary = False
         self.ponder_move_uci = None
         await self._send("stop")
         try:
@@ -756,7 +727,6 @@ class UCIEngine:
             self.alive = False
             self.is_thinking = False
             self.is_pondering = False
-            self.ponder_auxiliary = False
             self._uciok.set()
             self._readyok.set()
             self._bestmove_ev.set()
@@ -808,26 +778,26 @@ class UCIEngine:
         pm = parts[3] if len(parts) >= 4 and parts[2] == "ponder" else None
 
         was_ignored = self._ignore_next_bestmove
-        was_ponder = self.is_pondering or self.ponder_auxiliary
+        was_ponder = self.is_pondering
 
         self._ignore_next_bestmove = False
         self.best_move = bm
         self.ponder_reply = pm
         self.is_thinking = False
         self.is_pondering = False
-        self.ponder_auxiliary = False
         self._bestmove_ev.set()
 
         if not was_ignored and not was_ponder and self.on_bestmove and bm and bm not in ("(none)", "none", "0000"):
             self.on_bestmove(bm, pm)
 
     async def set_position(self, start_fen, move_list):
-        pos_str = "position startpos" if start_fen == chess.STARTING_FEN else f"position fen {start_fen}"
+        is_start = start_fen.split()[0] == START_BOARD_PART
+        pos_str = "position startpos" if is_start else f"position fen {start_fen}"
         if move_list:
             pos_str += " moves " + " ".join(move_list)
         await self._send(pos_str)
 
-    async def start_search(self, start_fen, move_list, go_cmd, ponder=False, ponder_move=None, aux_ponder=False):
+    async def start_search(self, start_fen, move_list, go_cmd, ponder=False, ponder_move=None):
         if not self.alive:
             return
         async with self._cmd_lock:
@@ -843,7 +813,6 @@ class UCIEngine:
             self._bestmove_ev.clear()
             self.is_thinking = True
             self.is_pondering = ponder
-            self.ponder_auxiliary = aux_ponder
             self.ponder_move_uci = ponder_move if ponder else None
             self.search_start_ts = time.monotonic()
             await self.set_position(start_fen, move_list)
@@ -853,7 +822,6 @@ class UCIEngine:
         async with self._cmd_lock:
             if self.is_thinking and self.is_pondering and not self._ignore_next_bestmove:
                 self.is_pondering = False
-                self.ponder_auxiliary = False
                 self.ponder_move_uci = None
                 self.search_start_ts = time.monotonic()
                 await self._send("ponderhit")
@@ -1170,12 +1138,12 @@ class CVTracker:
             self.candidate_cells = None
             self.stable_count = 0
 
-    def row_col_to_square(self, r, c):
-        file_idx = (7 - c) if self.flipped else c
-        rank_idx = r if self.flipped else (7 - r)
-        return chess.square(file_idx, rank_idx)
+    def screen_rc_to_board_rc(self, sr, sc):
+        br = (7 - sr) if self.flipped else sr
+        bc = (7 - sc) if self.flipped else sc
+        return br, bc
 
-    def detect_board_move(self, board_snapshot: chess.Board):
+    def detect_board_move(self, current_fen):
         if not self.zones["board"]:
             return None
         img, ox, oy = self.grab_screen(region=self.zones["board"])
@@ -1210,38 +1178,50 @@ class CVTracker:
         if self.stable_count < 2:
             return None
 
+        grid = fen_to_grid(current_fen)
+        parts = current_fen.strip().split()
+        turn = parts[1] if len(parts) > 1 else "w"
+        is_white = turn == "w"
+
         sq_scores = {}
+        for sr in range(8):
+            for sc in range(8):
+                br, bc = self.screen_rc_to_board_rc(sr, sc)
+                sq_scores[(br, bc)] = float(frame_diff[sr, sc])
+
+        from_cands = []
+        to_cands = []
         for r in range(8):
             for c in range(8):
-                sq = self.row_col_to_square(r, c)
-                sq_scores[sq] = float(frame_diff[r, c])
+                s = sq_scores[(r, c)]
+                if s < 4.2:
+                    continue
+                p = grid[r][c]
+                if p != "." and (p.isupper() if is_white else p.islower()):
+                    from_cands.append((r, c, s, p))
+                else:
+                    to_cands.append((r, c, s, p))
 
-        best_move = None
-        best_move_score = -1.0
-        for move in board_snapshot.legal_moves:
-            if move.promotion and move.promotion != chess.QUEEN:
-                continue
-            s_from = sq_scores.get(move.from_square, 0.0)
-            s_to = sq_scores.get(move.to_square, 0.0)
-            if s_from < 4.2 or s_to < 4.2:
-                continue
-            score = s_from + s_to
-            if board_snapshot.is_castling(move):
-                score += max(
-                    sq_scores.get(chess.A1, 0),
-                    sq_scores.get(chess.H1, 0),
-                    sq_scores.get(chess.A8, 0),
-                    sq_scores.get(chess.H8, 0),
-                ) * 0.5
-            if score > best_move_score:
-                best_move_score = score
-                best_move = move
+        best_uci = None
+        best_score = -1.0
+        for fr, fc, fs, fp in from_cands:
+            for tr, tc, ts, _ in to_cands:
+                if fr == tr and fc == tc:
+                    continue
+                score = fs + ts
+                if fp.lower() == "k" and abs(tc - fc) == 2 and fr == tr:
+                    rook_c = 7 if tc > fc else 0
+                    score += sq_scores.get((fr, rook_c), 0.0) * 0.5
+                if score > best_score:
+                    best_score = score
+                    promo = "q" if (fp.lower() == "p" and (tr == 0 or tr == 7)) else ""
+                    best_uci = rc_to_sq(fr, fc) + rc_to_sq(tr, tc) + promo
 
-        if best_move and best_move_score >= 12.0:
+        if best_uci and best_score >= 12.0:
             self.prev_cells = curr
             self.candidate_cells = None
             self.stable_count = 0
-            return best_move
+            return best_uci
         return None
 
     def read_ocr_clock_ms(self, zone_key):
@@ -1315,7 +1295,6 @@ class BridgeOrchestrator:
         ConfigManager.save(self.cfg)
         self._cfg_mtime = os.path.getmtime(CONFIG_PATH) if os.path.exists(CONFIG_PATH) else 0.0
 
-        self.book_path = None
         self.engine = UCIEngine(sf_bin, self.cfg.get("stockfish_uci", {}))
         self.engine.on_bestmove = self._on_engine_bestmove
         self.engine.on_info = self._on_engine_info
@@ -1323,26 +1302,22 @@ class BridgeOrchestrator:
         self.mouse = MouseController()
         self.cv = CVTracker()
 
-        self.our_color = chess.WHITE
-        self.board = chess.Board()
-        self.start_fen = chess.STARTING_FEN
+        self.our_color = "w"
+        self.turn = "w"
+        self.start_fen = STARTING_FEN
+        self.current_fen = STARTING_FEN
         self.move_history = []
         self._has_synced_state = False
         self.ext_active_ts = 0.0
         self._pending_move_uci = None
         self._pending_ponder_uci = None
         self._pending_move_ts = 0.0
+        self._pending_move_retries = 0
 
         self.wtime_ms = 180000
         self.btime_ms = 180000
         self.inc_ms = 0
-        self.last_clock_tick = time.monotonic()
 
-        self.pace_scale = 1.0
-        self.limit_time_ms = 0
-        self.limit_depth = 0
-        self.use_book = True
-        self.book_max_ply = 36
         self._apply_dict_to_runtime(self.cfg)
 
         self._latency_ema_ms = 25.0
@@ -1353,15 +1328,9 @@ class BridgeOrchestrator:
 
     async def init_assets_background(self):
         loop = asyncio.get_running_loop()
-        book_file = await loop.run_in_executor(None, AssetManager.ensure_opening_book, self.cfg.get("book_path"))
-        if book_file:
-            self.book_path = book_file
-            self.cfg["book_path"] = os.path.relpath(book_file, ROOT_DIR) if book_file.startswith(ROOT_DIR) else book_file
         rtbw, rtbz, _ = AssetManager.count_local_syzygy()
         if rtbw + rtbz < 70:
             await loop.run_in_executor(None, AssetManager.sync_syzygy_tables, 4)
-        ConfigManager.save(self.cfg)
-        self._cfg_mtime = os.path.getmtime(CONFIG_PATH) if os.path.exists(CONFIG_PATH) else 0.0
 
     def _is_ext_live(self):
         return len(self.ext_clients) > 0 and (time.monotonic() - self.ext_active_ts < 8.0)
@@ -1369,25 +1338,14 @@ class BridgeOrchestrator:
     def _apply_dict_to_runtime(self, data):
         self.mode = str(data.get("mode", "auto")).lower()
         self.autoplay = bool(data.get("autoplay", True))
-        self.use_book = bool(data.get("use_book", True))
-        self.book_max_ply = int(data.get("book_max_ply", 36))
-        b_path = data.get("book_path")
-        if b_path:
-            full_b = b_path if os.path.isabs(b_path) else os.path.join(ROOT_DIR, b_path)
-            if os.path.isfile(full_b):
-                self.book_path = full_b
-
         self.mouse.action_mode = str(data.get("mouse_action", "drag")).lower()
         self.mouse.speed_mode = str(data.get("mouse_speed", "instant")).lower()
         self.cv.fps = max(1, min(60, int(data.get("cv_fps", 25))))
-        self.pace_scale, self.limit_time_ms, self.limit_depth = parse_pace_spec(data.get("pace", "1.0x"))
 
         uci_sub = data.get("stockfish_uci", {})
         if isinstance(uci_sub, dict):
             self.engine.uci_config.update(uci_sub)
-        self.engine.uci_config["Slow Mover"] = max(10, min(1000, int(100 * self.pace_scale)))
         self.ponder_enabled = bool(self.engine.uci_config.get("Ponder", True))
-        self.variant = str(self.engine.uci_config.get("UCI_Variant", "chess")).lower()
 
     def _record_latency_sample(self, sample_ms):
         if sample_ms <= 0:
@@ -1397,58 +1355,28 @@ class BridgeOrchestrator:
         if self.loop:
             asyncio.run_coroutine_threadsafe(self.engine.update_dynamic_overhead(dyn_ovh), self.loop)
 
-    def _create_board(self, fen=None):
-        v = (self.variant or "chess").lower()
-        cls = chess.Board
-        try:
-            cls = chess.variant.find_variant(v)
-        except Exception:
-            cls = chess.Board
-        c960 = bool(self.engine.uci_config.get("UCI_Chess960", False))
-        b = cls(chess960=c960)
-        if fen and fen != chess.STARTING_FEN:
-            b.set_fen(sanitize_fen(fen))
-        return b
-
-    def _tick_virtual_clocks(self):
-        now = time.monotonic()
-        dt_ms = int((now - self.last_clock_tick) * 1000)
-        self.last_clock_tick = now
-        if len(self.move_history) == 0 or self.board.is_game_over():
-            return
-        if self.board.turn == chess.WHITE:
-            self.wtime_ms = max(50, self.wtime_ms - dt_ms)
-        else:
-            self.btime_ms = max(50, self.btime_ms - dt_ms)
-
+    def _sync_cv_clocks(self):
         if self.mode == "cv" or not self._is_ext_live():
             us_ocr = self.cv.read_ocr_clock_ms("clock_us")
             opp_ocr = self.cv.read_ocr_clock_ms("clock_opp")
             if us_ocr is not None:
-                if self.our_color == chess.WHITE:
+                if self.our_color == "w":
                     self.wtime_ms = us_ocr
                 else:
                     self.btime_ms = us_ocr
             if opp_ocr is not None:
-                if self.our_color == chess.WHITE:
+                if self.our_color == "w":
                     self.btime_ms = opp_ocr
                 else:
                     self.wtime_ms = opp_ocr
 
     def _build_go_command(self, ponder=False):
+        self._sync_cv_clocks()
         prefix = "go ponder" if ponder else "go"
-        parts = [prefix]
-        if self.limit_time_ms > 0:
-            parts.append(f"movetime {self.limit_time_ms}")
-        else:
-            self._tick_virtual_clocks()
-            wt = max(50, int(self.wtime_ms * self.pace_scale))
-            bt = max(50, int(self.btime_ms * self.pace_scale))
-            inc = int(self.inc_ms * min(1.5, self.pace_scale))
-            parts.append(f"wtime {wt} btime {bt} winc {inc} binc {inc}")
-        if self.limit_depth > 0:
-            parts.append(f"depth {self.limit_depth}")
-        return " ".join(parts)
+        wt = max(1, int(self.wtime_ms))
+        bt = max(1, int(self.btime_ms))
+        inc = max(0, int(self.inc_ms))
+        return f"{prefix} wtime {wt} btime {bt} winc {inc} binc {inc}"
 
     def _format_score(self, info_dict, perspective_turn):
         sc = info_dict.get("score", 0)
@@ -1462,7 +1390,7 @@ class BridgeOrchestrator:
             return
         self._last_hud_ts = now
 
-        col_tag = "W" if self.our_color == chess.WHITE else "B"
+        col_tag = "W" if self.our_color == "w" else "B"
         ovh = self.engine.dynamic_overhead
         inf = self.engine.last_info
         pv_l = inf.get("pv_list", [])
@@ -1477,15 +1405,10 @@ class BridgeOrchestrator:
             reply_m = pv_l[0] if pv_l else "-"
             ev_s = self._format_score(inf, self.our_color)
             hud = f"\033[96m[PONDER|{col_tag}]\033[0m opp: \033[93m{opp_m}\033[0m -> reply: \033[92m{reply_m}\033[0m ({ev_s}) | d={d} | {nps_k}kN/s{tb_str} | t={t_ms}ms"
-        elif self.engine.ponder_auxiliary:
-            opp_m = pv_l[0] if len(pv_l) >= 1 else "-"
-            reply_m = pv_l[1] if len(pv_l) >= 2 else "-"
-            ev_s = self._format_score(inf, self.board.turn)
-            hud = f"\033[96m[PONDER|{col_tag}]\033[0m opp: \033[93m{opp_m}\033[0m -> reply: \033[92m{reply_m}\033[0m ({ev_s}) | d={d} | {nps_k}kN/s{tb_str} | t={t_ms}ms"
         else:
             m1 = pv_l[0] if pv_l else "-"
             p_next = pv_l[1] if len(pv_l) >= 2 else "-"
-            ev1 = self._format_score(inf, self.board.turn)
+            ev1 = self._format_score(inf, self.turn)
             hud = f"\033[94m[SEARCH|{col_tag}]\033[0m best: \033[92m{m1}\033[0m ({ev1}) | ponder: {p_next} | d={d} | {nps_k}kN/s{tb_str} | t={t_ms}ms | ovh={ovh}ms"
 
         sys.stdout.write(f"\r\033[K{hud}")
@@ -1493,7 +1416,7 @@ class BridgeOrchestrator:
 
     def _on_engine_bestmove(self, best_uci, ponder_uci):
         if self.loop:
-            asyncio.run_coroutine_threadsafe(self._dispatch_bestmove(best_uci, ponder_uci, from_book=False), self.loop)
+            asyncio.run_coroutine_threadsafe(self._dispatch_bestmove(best_uci, ponder_uci), self.loop)
 
     async def _send_move_to_ext(self, best_uci):
         payload = json.dumps({
@@ -1513,35 +1436,23 @@ class BridgeOrchestrator:
                 self.ext_clients.discard(ws)
         return sent
 
-    async def _dispatch_bestmove(self, best_uci, ponder_uci, from_book=False):
+    async def _dispatch_bestmove(self, best_uci, ponder_uci):
         async with self._lock:
-            if self.board.turn != self.our_color:
-                return
-            try:
-                move = chess.Move.from_uci(best_uci)
-                if move not in self.board.legal_moves:
-                    return
-            except Exception:
+            if self.turn != self.our_color or not best_uci or len(best_uci) < 4:
                 return
 
-            if from_book:
-                ev_s = "BOOK"
-                depth = 0
-                t_ms = 0
-            else:
-                inf = self.engine.last_info
-                ev_s = self._format_score(inf, self.board.turn)
-                depth = max(1, inf.get("depth", 1))
-                t_ms = max(1, inf.get("time", int((time.monotonic() - self.engine.search_start_ts) * 1000)))
-                if not ponder_uci:
-                    pv_l = inf.get("pv_list", [])
-                    if len(pv_l) >= 2:
-                        ponder_uci = pv_l[1]
+            inf = self.engine.last_info
+            ev_s = self._format_score(inf, self.turn)
+            depth = max(1, inf.get("depth", 1))
+            t_ms = max(1, inf.get("time", int((time.monotonic() - self.engine.search_start_ts) * 1000)))
+            if not ponder_uci:
+                pv_l = inf.get("pv_list", [])
+                if len(pv_l) >= 2:
+                    ponder_uci = pv_l[1]
 
             mode_badge = "AUTO" if self.autoplay else "SUGGEST"
-            src_badge = "BOOK" if from_book else "SF"
             sys.stdout.write(
-                f"\r\033[K\033[92m[BEST|{mode_badge}|{src_badge}] {best_uci} | eval: {ev_s} | depth: {depth} | time: {t_ms}ms\033[0m\n"
+                f"\r\033[K\033[92m[BEST|{mode_badge}|SF] {best_uci} | eval: {ev_s} | depth: {depth} | time: {t_ms}ms\033[0m\n"
             )
             sys.stdout.flush()
 
@@ -1549,27 +1460,22 @@ class BridgeOrchestrator:
 
             if not self.autoplay:
                 if self.ponder_enabled and ponder_uci:
-                    temp_b = self.board.copy()
-                    temp_b.push(move)
-                    try:
-                        pm = chess.Move.from_uci(ponder_uci)
-                        if pm in temp_b.legal_moves:
-                            p_hist = list(self.move_history) + [best_uci, ponder_uci]
-                            await self.engine.start_search(
-                                self.start_fen,
-                                p_hist,
-                                "go ponder infinite",
-                                ponder=True,
-                                ponder_move=ponder_uci,
-                            )
-                    except Exception:
-                        pass
+                    p_hist = list(self.move_history) + [best_uci, ponder_uci]
+                    go_cmd = self._build_go_command(ponder=True)
+                    await self.engine.start_search(
+                        self.start_fen,
+                        p_hist,
+                        go_cmd,
+                        ponder=True,
+                        ponder_move=ponder_uci,
+                    )
                 return
 
             use_ext = (self.mode == "ext") or (self.mode == "auto" and (len(self.ext_clients) > 0 or not self.cv.zones["board"]))
             if use_ext:
                 self._pending_move_uci = best_uci
                 self._pending_move_ts = time.monotonic()
+                self._pending_move_retries = 0
                 await self._send_move_to_ext(best_uci)
             elif self.cv.zones["board"]:
                 t0 = time.monotonic()
@@ -1584,75 +1490,39 @@ class BridgeOrchestrator:
                 await asyncio.sleep(0.05)
                 self.cv.reset_reference()
                 if executed:
-                    self._apply_move_internal(move)
-                    if self.ponder_enabled and not self.board.is_game_over():
+                    self._apply_move_internal(best_uci)
+                    if self.ponder_enabled and ponder_uci:
                         await self._start_ponder_on_opponent_turn(ponder_uci)
 
-    def _apply_move_internal(self, move: chess.Move):
-        self._tick_virtual_clocks()
-        if self.board.turn == chess.WHITE:
-            self.wtime_ms += self.inc_ms
-        else:
-            self.btime_ms += self.inc_ms
-        self.board.push(move)
-        self.move_history.append(move.uci())
-        self.last_clock_tick = time.monotonic()
+    def _apply_move_internal(self, uci_move):
+        self.current_fen = apply_uci_to_fen(self.current_fen, uci_move)
+        self.turn = "b" if self.turn == "w" else "w"
+        self.move_history.append(uci_move)
 
     async def _start_ponder_on_opponent_turn(self, ponder_uci=None):
-        if self.board.is_game_over() or self.board.turn == self.our_color:
+        if self.turn == self.our_color or not ponder_uci:
             return
-        if not ponder_uci and self.use_book and self.book_path:
-            book_opp, _ = AssetManager.query_book_move(self.book_path, self.board)
-            if book_opp:
-                ponder_uci = book_opp
-
-        if ponder_uci:
-            try:
-                p_move = chess.Move.from_uci(ponder_uci)
-                if p_move in self.board.legal_moves:
-                    ponder_history = list(self.move_history) + [ponder_uci]
-                    go_cmd = self._build_go_command(ponder=True)
-                    await self.engine.start_search(
-                        self.start_fen,
-                        ponder_history,
-                        go_cmd,
-                        ponder=True,
-                        ponder_move=ponder_uci,
-                    )
-                    return
-            except Exception:
-                pass
+        ponder_history = list(self.move_history) + [ponder_uci]
+        go_cmd = self._build_go_command(ponder=True)
         await self.engine.start_search(
             self.start_fen,
-            self.move_history,
-            "go infinite",
-            ponder=False,
-            aux_ponder=True,
+            ponder_history,
+            go_cmd,
+            ponder=True,
+            ponder_move=ponder_uci,
         )
 
     async def _trigger_our_turn_search(self, last_opp_move_uci=None):
-        if self.board.is_game_over() or self.board.turn != self.our_color:
+        if self.turn != self.our_color:
             return
         self._pending_move_uci = None
 
-        if self.use_book and self.book_path and len(self.move_history) <= self.book_max_ply and self.variant == "chess":
-            book_best, book_ponder = AssetManager.query_book_move(self.book_path, self.board)
-            if book_best:
-                await self.engine.abort_search()
-                if self.loop:
-                    asyncio.create_task(self._dispatch_bestmove(book_best, book_ponder, from_book=True))
-                return
-
-        our_ms = self.wtime_ms if self.our_color == chess.WHITE else self.btime_ms
         if (
             self.ponder_enabled
             and self.engine.is_thinking
             and self.engine.is_pondering
             and last_opp_move_uci
             and self.engine.ponder_move_uci == last_opp_move_uci
-            and self.limit_time_ms == 0
-            and self.limit_depth == 0
-            and our_ms > 5000
         ):
             hit = await self.engine.ponderhit()
             if hit:
@@ -1666,160 +1536,119 @@ class BridgeOrchestrator:
             ponder=False,
         )
 
-    def _reconcile_board_by_fen(self, fen_clean):
-        parts = fen_clean.split()
-        target_map = parts[0]
-        target_turn = parts[1] if len(parts) > 1 else None
-        curr_map = self.board.fen().split()[0]
-        if target_map == curr_map:
-            if target_turn in ("w", "b"):
-                want_turn = chess.WHITE if target_turn == "w" else chess.BLACK
-                if self.board.turn != want_turn:
-                    self.board = self._create_board(fen=fen_clean)
-                    self.start_fen = self.board.fen()
-                    self.move_history.clear()
-                    return True, None
-            return False, None
-
-        for m1 in self.board.legal_moves:
-            self.board.push(m1)
-            if self.board.fen().split()[0] == target_map:
-                u1 = m1.uci()
-                self.move_history.append(u1)
-                return True, u1
-            self.board.pop()
-
-        for m1 in self.board.legal_moves:
-            self.board.push(m1)
-            for m2 in self.board.legal_moves:
-                self.board.push(m2)
-                if self.board.fen().split()[0] == target_map:
-                    u1, u2 = m1.uci(), m2.uci()
-                    self.move_history.extend([u1, u2])
-                    return True, u2
-                self.board.pop()
-            self.board.pop()
-
-        try:
-            self.board = self._create_board(fen=fen_clean)
-            self.start_fen = self.board.fen()
-            self.move_history.clear()
-            return True, None
-        except Exception:
-            return False, None
-
-    async def handle_external_position(self, fen=None, uci_moves=None, san_moves=None, our_color_str=None, wtime=None, btime=None, inc=None, is_new_game=False):
+    async def handle_external_position(self, fen=None, uci_moves=None, our_color_str=None, turn_str=None, wtime=None, btime=None, inc=None, is_new_game=False):
         async with self._lock:
             first_sync = not self._has_synced_state
             self._has_synced_state = True
             self.ext_active_ts = time.monotonic()
 
             color_changed = False
-            if our_color_str in ("white", "w") and self.our_color != chess.WHITE:
-                self.our_color = chess.WHITE
+            if our_color_str in ("white", "w") and self.our_color != "w":
+                self.our_color = "w"
                 self.cv.flipped = False
                 color_changed = True
-            elif our_color_str in ("black", "b") and self.our_color != chess.BLACK:
-                self.our_color = chess.BLACK
+            elif our_color_str in ("black", "b") and self.our_color != "b":
+                self.our_color = "b"
                 self.cv.flipped = True
                 color_changed = True
 
-            if wtime is not None and wtime > 0:
-                self.wtime_ms = int(wtime)
-            if btime is not None and btime > 0:
-                self.btime_ms = int(btime)
+            if wtime is not None and (wtime > 0 or (btime is not None and btime > 0)):
+                self.wtime_ms = max(0, int(wtime))
+            if btime is not None and (btime > 0 or (wtime is not None and wtime > 0)):
+                self.btime_ms = max(0, int(btime))
             if inc is not None and inc >= 0:
                 self.inc_ms = int(inc)
-            self.last_clock_tick = time.monotonic()
 
-            fen_clean = sanitize_fen(fen) if fen else None
-            is_start_fen = bool(fen_clean and fen_clean.startswith("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"))
+            fen_str = fen.strip() if fen else None
+            is_start_fen = bool(fen_str and fen_str.split()[0] == START_BOARD_PART)
 
             if is_new_game or (is_start_fen and len(self.move_history) > 0):
                 await self.engine.new_game()
-                self.start_fen = chess.STARTING_FEN
-                self.board = self._create_board()
+                self.start_fen = STARTING_FEN
+                self.current_fen = STARTING_FEN
+                self.turn = "w"
                 self.move_history.clear()
                 self._pending_move_uci = None
                 self._pending_ponder_uci = None
-                col_name = "WHITE" if self.our_color == chess.WHITE else "BLACK"
+                col_name = "WHITE" if self.our_color == "w" else "BLACK"
                 sys.stdout.write(f"\r\033[K\033[95m[NEW GAME] Playing as {col_name}\033[0m\n")
                 sys.stdout.flush()
-                if self.board.turn == self.our_color:
+                if self.turn == self.our_color:
                     await self._trigger_our_turn_search()
                 return
 
             changed = first_sync
             last_move_uci = None
 
-            if uci_moves is not None and len(uci_moves) > 0:
-                new_board = self._create_board(fen=chess.STARTING_FEN)
-                valid_ucis = []
-                for u in uci_moves:
-                    try:
-                        m = chess.Move.from_uci(u)
-                        if m in new_board.legal_moves:
-                            new_board.push(m)
-                            valid_ucis.append(u)
-                        else:
-                            break
-                    except Exception:
-                        break
-                if valid_ucis and valid_ucis != self.move_history:
-                    if not fen_clean or new_board.fen().split()[0] == fen_clean.split()[0]:
-                        last_move_uci = valid_ucis[-1]
-                        self.start_fen = chess.STARTING_FEN
-                        self.board = new_board
-                        self.move_history = valid_ucis
-                        changed = True
+            if uci_moves and isinstance(uci_moves, list):
+                clean_ucis = [str(u).strip() for u in uci_moves if u and len(str(u).strip()) >= 4]
+                if clean_ucis and clean_ucis != self.move_history:
+                    self.start_fen = STARTING_FEN
+                    self.move_history = clean_ucis
+                    last_move_uci = clean_ucis[-1]
+                    if fen_str:
+                        self.current_fen = fen_str
+                    else:
+                        f_tmp = STARTING_FEN
+                        for u in clean_ucis:
+                            f_tmp = apply_uci_to_fen(f_tmp, u)
+                        self.current_fen = f_tmp
+                    changed = True
 
-            elif san_moves is not None and len(san_moves) > 0:
-                new_board = self._create_board(fen=chess.STARTING_FEN)
-                valid_ucis = []
-                for s in san_moves:
-                    try:
-                        m = new_board.parse_san(s)
-                        new_board.push(m)
-                        valid_ucis.append(m.uci())
-                    except Exception:
-                        break
-                if valid_ucis and valid_ucis != self.move_history:
-                    if not fen_clean or new_board.fen().split()[0] == fen_clean.split()[0]:
-                        last_move_uci = valid_ucis[-1]
-                        self.start_fen = chess.STARTING_FEN
-                        self.board = new_board
-                        self.move_history = valid_ucis
-                        changed = True
+            if fen_str and not is_start_fen:
+                old_board_part = self.current_fen.split()[0]
+                new_board_part = fen_str.split()[0]
+                if new_board_part != old_board_part:
+                    diff_u = diff_fen_move(self.current_fen, fen_str)
+                    if diff_u:
+                        self.move_history.append(diff_u)
+                        last_move_uci = diff_u
+                    else:
+                        diff_u2 = None
+                        if self._pending_move_uci:
+                            mid_fen = apply_uci_to_fen(self.current_fen, self._pending_move_uci)
+                            diff_u2 = diff_fen_move(mid_fen, fen_str)
+                            if diff_u2:
+                                self.move_history.extend([self._pending_move_uci, diff_u2])
+                                last_move_uci = diff_u2
+                        if not diff_u2:
+                            self.start_fen = fen_str
+                            self.move_history.clear()
+                            last_move_uci = None
+                    self.current_fen = fen_str
+                    changed = True
 
-            if fen_clean and not is_start_fen:
-                if self.board.fen().split()[0] != fen_clean.split()[0]:
-                    rec_changed, rec_last = self._reconcile_board_by_fen(fen_clean)
-                    if rec_changed:
-                        changed = True
-                        last_move_uci = rec_last
+            if turn_str in ("white", "w"):
+                new_turn = "w"
+            elif turn_str in ("black", "b"):
+                new_turn = "b"
+            elif fen_str and len(fen_str.split()) > 1 and fen_str.split()[1] in ("w", "b"):
+                new_turn = fen_str.split()[1]
+            else:
+                new_turn = "b" if len(self.move_history) % 2 == 1 else "w"
+
+            if new_turn != self.turn:
+                self.turn = new_turn
+                changed = True
 
             if changed or color_changed:
                 self._pending_move_uci = None
-                col_str = "WHITE" if self.our_color == chess.WHITE else "BLACK"
-                turn_str = "WHITE" if self.board.turn == chess.WHITE else "BLACK"
+                col_label = "WHITE" if self.our_color == "w" else "BLACK"
+                turn_label = "WHITE" if self.turn == "w" else "BLACK"
                 sys.stdout.write(
-                    f"\r\033[K\033[90m[SYNC] playing: {col_str} | turn: {turn_str} | moves: {len(self.move_history)} | last: {last_move_uci or '-'}\033[0m\n"
+                    f"\r\033[K\033[90m[SYNC] playing: {col_label} | turn: {turn_label} | moves: {len(self.move_history)} | last: {last_move_uci or '-'}\033[0m\n"
                 )
                 sys.stdout.flush()
 
-            if self.board.is_game_over():
-                await self.engine.abort_search()
-                return
-
-            if self.board.turn == self.our_color:
+            if self.turn == self.our_color:
                 if changed or color_changed:
                     await self._trigger_our_turn_search(last_opp_move_uci=last_move_uci)
                 elif not self.engine.is_thinking and not self._pending_move_uci:
                     await self._trigger_our_turn_search(last_opp_move_uci=last_move_uci)
-                elif self.engine.is_pondering or self.engine.ponder_auxiliary:
+                elif self.engine.is_pondering:
                     await self._trigger_our_turn_search(last_opp_move_uci=last_move_uci)
             else:
-                if self.engine.is_thinking and not self.engine.is_pondering and not self.engine.ponder_auxiliary:
+                if self.engine.is_thinking and not self.engine.is_pondering:
                     await self.engine.abort_search()
                 if self.ponder_enabled and (changed or color_changed or not self.engine.is_thinking):
                     await self._start_ponder_on_opponent_turn(self._pending_ponder_uci or self.engine.ponder_reply)
@@ -1844,19 +1673,23 @@ class BridgeOrchestrator:
                     exec_ms = float(msg.get("execMs") or 0)
                     if exec_ms > 0:
                         self._record_latency_sample(exec_ms)
+                    if msg.get("ok", True):
+                        self._pending_move_ts = time.monotonic()
+                    else:
+                        self._pending_move_retries += 1
                 elif mtype == "state":
                     col = msg.get("color")
                     our_t = msg.get("ourTimeMs")
                     opp_t = msg.get("oppTimeMs")
                     wt, bt = None, None
                     if our_t is not None and opp_t is not None:
-                        eff_white = (col == "white") if col in ("white", "black") else (self.our_color == chess.WHITE)
+                        eff_white = (col == "white") if col in ("white", "black") else (self.our_color == "w")
                         wt, bt = (our_t, opp_t) if eff_white else (opp_t, our_t)
                     await self.handle_external_position(
                         fen=msg.get("fen"),
                         uci_moves=msg.get("uciMoves"),
-                        san_moves=msg.get("sanMoves"),
                         our_color_str=col,
+                        turn_str=msg.get("turn"),
                         wtime=wt,
                         btime=bt,
                         inc=msg.get("increment"),
@@ -1874,11 +1707,15 @@ class BridgeOrchestrator:
                 if (
                     self.autoplay
                     and self._pending_move_uci
-                    and self.board.turn == self.our_color
-                    and not self.board.is_game_over()
+                    and self.turn == self.our_color
                     and len(self.ext_clients) > 0
                 ):
                     if time.monotonic() - self._pending_move_ts >= 0.45:
+                        self._pending_move_retries += 1
+                        if self._pending_move_retries > 3:
+                            self._pending_move_uci = None
+                            self._pending_move_retries = 0
+                            continue
                         self._pending_move_ts = time.monotonic()
                         await self._send_move_to_ext(self._pending_move_uci)
 
@@ -1893,23 +1730,20 @@ class BridgeOrchestrator:
                 continue
             try:
                 async with self._lock:
-                    board_copy = self.board.copy(stack=False)
+                    fen_snap = self.current_fen
                 t0 = time.monotonic()
-                detected_move = await asyncio.get_running_loop().run_in_executor(
-                    None, self.cv.detect_board_move, board_copy
+                detected_uci = await asyncio.get_running_loop().run_in_executor(
+                    None, self.cv.detect_board_move, fen_snap
                 )
-                if detected_move:
+                if detected_uci:
                     self._record_latency_sample((time.monotonic() - t0) * 1000.0)
-                    uci_str = detected_move.uci()
                     async with self._lock:
                         self._has_synced_state = True
-                        if detected_move in self.board.legal_moves:
-                            self._apply_move_internal(detected_move)
-                            if self.board.turn == self.our_color and not self.board.is_game_over():
-                                await self._trigger_our_turn_search(last_opp_move_uci=uci_str)
-                            elif self.board.turn != self.our_color and not self.board.is_game_over():
-                                if self.ponder_enabled:
-                                    await self._start_ponder_on_opponent_turn(self._pending_ponder_uci or self.engine.ponder_reply)
+                        self._apply_move_internal(detected_uci)
+                        if self.turn == self.our_color:
+                            await self._trigger_our_turn_search(last_opp_move_uci=detected_uci)
+                        elif self.ponder_enabled:
+                            await self._start_ponder_on_opponent_turn(self._pending_ponder_uci or self.engine.ponder_reply)
             except Exception:
                 pass
 
@@ -1929,20 +1763,17 @@ class BridgeOrchestrator:
                     sys.stdout.flush()
                     if self._has_synced_state:
                         async with self._lock:
-                            if self.board.turn == self.our_color and not self.board.is_game_over():
+                            if self.turn == self.our_color:
                                 await self._trigger_our_turn_search()
-                            elif self.board.turn != self.our_color and self.ponder_enabled and not self.board.is_game_over():
+                            elif self.ponder_enabled:
                                 await self._start_ponder_on_opponent_turn(self._pending_ponder_uci or self.engine.ponder_reply)
             except Exception:
                 pass
 
     def print_assets_status(self):
         rtbw, rtbz, total_bytes = AssetManager.count_local_syzygy()
-        b_ok = AssetManager.verify_polyglot_book(self.book_path)
-        b_size = (os.path.getsize(self.book_path) / 1024.0) if b_ok else 0.0
         sys.stdout.write("\r\033[K")
         print("\n" + "=" * 64)
-        print(f" Opening Book : {'ACTIVE' if (self.use_book and b_ok) else 'OFF'} | {self.book_path or 'None'} ({b_size:.1f} KB)")
         print(f" Syzygy Dir   : {SYZYGY_DIR}")
         print(f" Syzygy Files : {rtbw} WDL (.rtbw) + {rtbz} DTZ (.rtbz) = {rtbw + rtbz} files ({total_bytes / (1024*1024):.1f} MB)")
         print("=" * 64 + "\n")
@@ -1958,13 +1789,11 @@ class BridgeOrchestrator:
         print("\n" + "=" * 64)
         print(" Commands:")
         print("   set <key> <val>          - Change config or Stockfish UCI setting live")
-        print("   pace <val>               - Speed/limit: '0.5x', '600ms', 'd20', '500ms d18'")
         print("   threads <N> | hash <MB>  - Set CPU threads and RAM hash size")
         print("   autoplay <on|off>        - Toggle automatic move execution")
-        print("   ponder <on|off>          - Toggle opponent prediction & reply")
-        print("   book <on|off>            - Toggle Polyglot opening book")
-        print("   assets status            - Show Opening Book & Syzygy status")
-        print("   assets sync <4men|5men|book> - Download/update Syzygy tables or book")
+        print("   ponder <on|off>          - Toggle UCI ponder")
+        print("   assets status            - Show Syzygy status")
+        print("   assets sync <4men|5men>  - Download/update Syzygy tables")
         print("   mode <auto|ext|cv>       - Switch input source")
         print("   mouse <drag|click> <instant|smooth> - Configure CV mouse behavior")
         print("   sync                     - Locate clipboard screenshot on screen")
@@ -1986,14 +1815,8 @@ class BridgeOrchestrator:
             sys.stdout.flush()
             return
 
-        if k_low in ("pace", "limit"):
-            self.cfg["pace"] = v
-        elif k_low == "autoplay":
+        if k_low == "autoplay":
             self.cfg["autoplay"] = as_bool
-        elif k_low in ("book", "use_book"):
-            self.cfg["use_book"] = as_bool
-        elif k_low == "book_max_ply":
-            self.cfg["book_max_ply"] = max(2, int(v))
         elif k_low == "mode" and v_low in ("auto", "ext", "cv"):
             self.cfg["mode"] = v_low
         elif k_low == "mouse_action" and v_low in ("drag", "click"):
@@ -2035,9 +1858,9 @@ class BridgeOrchestrator:
 
         if self._has_synced_state:
             async with self._lock:
-                if self.board.turn == self.our_color and not self.board.is_game_over():
+                if self.turn == self.our_color:
                     await self._trigger_our_turn_search()
-                elif self.board.turn != self.our_color and self.ponder_enabled and not self.board.is_game_over():
+                elif self.ponder_enabled:
                     await self._start_ponder_on_opponent_turn(self._pending_ponder_uci or self.engine.ponder_reply)
 
     async def process_cli_line(self, line):
@@ -2059,14 +1882,7 @@ class BridgeOrchestrator:
             elif sub == "sync":
                 target = parts[2].lower() if len(parts) >= 3 else "4men"
                 loop = asyncio.get_running_loop()
-                if target == "book":
-                    b_file = await loop.run_in_executor(None, AssetManager.ensure_opening_book, None)
-                    if b_file:
-                        self.book_path = b_file
-                        self.cfg["book_path"] = os.path.relpath(b_file, ROOT_DIR)
-                        ConfigManager.save(self.cfg)
-                        self._cfg_mtime = os.path.getmtime(CONFIG_PATH)
-                elif target in ("4men", "3-4"):
+                if target in ("4men", "3-4"):
                     await loop.run_in_executor(None, AssetManager.sync_syzygy_tables, 4)
                     self.cfg["syzygy_profile"] = "4men"
                     ConfigManager.save(self.cfg)
@@ -2085,19 +1901,19 @@ class BridgeOrchestrator:
             ok, msg = await asyncio.get_running_loop().run_in_executor(None, self.cv.sync_from_clipboard_image)
             if ok:
                 self._has_synced_state = True
-                self.our_color = chess.BLACK if self.cv.flipped else chess.WHITE
+                self.our_color = "b" if self.cv.flipped else "w"
             sys.stdout.write(f"\r\033[K[{'+' if ok else '-'}] {msg}\n")
             sys.stdout.flush()
-            if ok and self.board.turn == self.our_color:
+            if ok and self.turn == self.our_color:
                 async with self._lock:
                     await self._trigger_our_turn_search()
         elif cmd == "autodetect":
             rect = await asyncio.get_running_loop().run_in_executor(None, self.cv.autodetect_board)
             if rect:
                 self._has_synced_state = True
-                self.our_color = chess.BLACK if self.cv.flipped else chess.WHITE
+                self.our_color = "b" if self.cv.flipped else "w"
                 sys.stdout.write(f"\r\033[K[+] Board autodetected at {rect} (flipped={self.cv.flipped})\n")
-                if self.board.turn == self.our_color:
+                if self.turn == self.our_color:
                     async with self._lock:
                         await self._trigger_our_turn_search()
             else:

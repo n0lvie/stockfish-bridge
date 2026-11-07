@@ -1,5 +1,7 @@
-/*
+*
+!/.gitignore
 !/bridge.py
+!/extension/
 !/extension/background.js
 !/extension/content.js
 !/extension/manifest.json
