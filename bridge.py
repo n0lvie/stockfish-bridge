@@ -141,45 +141,123 @@ def apply_uci_to_fen(fen, uci):
     return f"{grid_to_board_fen(grid)} {next_turn} KQkq - 0 1"
 
 
+def is_square_attacked(grid, tr, tc, attacker_color):
+    is_w = attacker_color == "w"
+    knight_sym = "N" if is_w else "n"
+    for dr, dc in ((-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1)):
+        nr, nc = tr + dr, tc + dc
+        if 0 <= nr < 8 and 0 <= nc < 8 and grid[nr][nc] == knight_sym:
+            return True
+    pawn_sym = "P" if is_w else "p"
+    p_dr = 1 if is_w else -1
+    for p_dc in (-1, 1):
+        nr, nc = tr + p_dr, tc + p_dc
+        if 0 <= nr < 8 and 0 <= nc < 8 and grid[nr][nc] == pawn_sym:
+            return True
+    king_sym = "K" if is_w else "k"
+    for dr in (-1, 0, 1):
+        for dc in (-1, 0, 1):
+            if dr == 0 and dc == 0:
+                continue
+            nr, nc = tr + dr, tc + dc
+            if 0 <= nr < 8 and 0 <= nc < 8 and grid[nr][nc] == king_sym:
+                return True
+    rq_syms = ("R", "Q") if is_w else ("r", "q")
+    for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        nr, nc = tr + dr, tc + dc
+        while 0 <= nr < 8 and 0 <= nc < 8:
+            p = grid[nr][nc]
+            if p != ".":
+                if p in rq_syms:
+                    return True
+                break
+            nr += dr
+            nc += dc
+    bq_syms = ("B", "Q") if is_w else ("b", "q")
+    for dr, dc in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
+        nr, nc = tr + dr, tc + dc
+        while 0 <= nr < 8 and 0 <= nc < 8:
+            p = grid[nr][nc]
+            if p != ".":
+                if p in bq_syms:
+                    return True
+                break
+            nr += dr
+            nc += dc
+    return False
+
+
+def sanitize_fen_turn(fen_str, default_turn="w"):
+    if not fen_str:
+        return fen_str
+    parts = fen_str.strip().split()
+    board = parts[0]
+    grid = fen_to_grid(board)
+    wk_pos = None
+    bk_pos = None
+    for r in range(8):
+        for c in range(8):
+            if grid[r][c] == "K":
+                wk_pos = (r, c)
+            elif grid[r][c] == "k":
+                bk_pos = (r, c)
+    assigned_turn = parts[1] if len(parts) > 1 else default_turn
+    if bk_pos and is_square_attacked(grid, bk_pos[0], bk_pos[1], "w"):
+        assigned_turn = "b"
+    elif wk_pos and is_square_attacked(grid, wk_pos[0], wk_pos[1], "b"):
+        assigned_turn = "w"
+    castling = parts[2] if len(parts) > 2 else "-"
+    return f"{board} {assigned_turn} {castling} - 0 1"
+
+
 def diff_fen_move(old_fen, new_fen):
+    if not old_fen or not new_fen:
+        return None
     g1 = fen_to_grid(old_fen)
     g2 = fen_to_grid(new_fen)
     if g1 == g2:
         return None
     if g1[7][4] == "K" and g2[7][4] == ".":
         if g2[7][6] == "K" and g2[7][5] == "R":
-            return "e1g1"
+            return "e1g1", "w"
         if g2[7][2] == "K" and g2[7][3] == "R":
-            return "e1c1"
+            return "e1c1", "w"
     if g1[0][4] == "k" and g2[0][4] == ".":
         if g2[0][6] == "k" and g2[0][5] == "r":
-            return "e8g8"
+            return "e8g8", "b"
         if g2[0][2] == "k" and g2[0][3] == "r":
-            return "e8c8"
+            return "e8c8", "b"
 
-    parts = old_fen.strip().split()
-    turn = parts[1] if len(parts) > 1 else "w"
-    is_white = turn == "w"
     changed = [(r, c) for r in range(8) for c in range(8) if g1[r][c] != g2[r][c]]
+    if not changed:
+        return None
 
-    from_sq = [
-        (r, c)
-        for (r, c) in changed
-        if g2[r][c] == "." and (g1[r][c].isupper() if is_white else g1[r][c].islower())
-    ]
-    to_sq = [
-        (r, c)
-        for (r, c) in changed
-        if g2[r][c] != "." and (g2[r][c].isupper() if is_white else g2[r][c].islower())
-    ]
+    vacated = [(r, c) for (r, c) in changed if g2[r][c] == "."]
+    occupied = [(r, c) for (r, c) in changed if g2[r][c] != "."]
 
-    if len(from_sq) == 1 and len(to_sq) == 1:
-        fr, fc = from_sq[0]
-        tr, tc = to_sq[0]
+    if len(vacated) == 1 and len(occupied) == 1:
+        fr, fc = vacated[0]
+        tr, tc = occupied[0]
         moved = g1[fr][fc]
         landed = g2[tr][tc]
         promo = landed.lower() if (moved.lower() == "p" and landed.lower() != "p") else ""
-        return rc_to_sq(fr, fc) + rc_to_sq(tr, tc) + promo
+        if moved.lower() == "p" and (tr == 0 or tr == 7) and not promo:
+            promo = "q"
+        mover = "w" if moved.isupper() else "b"
+        return rc_to_sq(fr, fc) + rc_to_sq(tr, tc) + promo, mover
+
+    if len(vacated) == 2 and len(occupied) == 1:
+        tr, tc = occupied[0]
+        landed = g2[tr][tc]
+        if landed.lower() == "p":
+            mover = "w" if landed.isupper() else "b"
+            for vr, vc in vacated:
+                if g1[vr][vc].lower() == "p" and vc != tc:
+                    return rc_to_sq(vr, vc) + rc_to_sq(tr, tc), mover
+            for vr, vc in vacated:
+                if g1[vr][vc].lower() == "p":
+                    return rc_to_sq(vr, vc) + rc_to_sq(tr, tc), mover
+
     return None
 
 
@@ -536,7 +614,7 @@ class UCIEngine:
         self.alive = False
         self.supported_options = {}
         self.uci_config = dict(uci_dict)
-        self.dynamic_overhead = 35
+        self.dynamic_overhead = 200
 
         self.is_thinking = False
         self.is_pondering = False
@@ -646,7 +724,9 @@ class UCIEngine:
             await self.set_uci_option("MultiPV", 1)
 
     async def _stop_unlocked(self):
-        if not self.is_thinking:
+        if not self.is_thinking or not self.alive or not self.proc or self.proc.poll() is not None:
+            self.is_thinking = False
+            self.is_pondering = False
             return
         self._ignore_next_bestmove = True
         self.is_pondering = False
@@ -676,7 +756,7 @@ class UCIEngine:
             await self.sync_ready()
 
     async def update_dynamic_overhead(self, overhead_ms):
-        clamped = max(15, min(500, int(overhead_ms)))
+        clamped = max(100, min(800, int(overhead_ms)))
         if abs(clamped - self.dynamic_overhead) >= 8:
             self.dynamic_overhead = clamped
             if self.alive and not self.is_thinking:
@@ -798,6 +878,8 @@ class UCIEngine:
         await self._send(pos_str)
 
     async def start_search(self, start_fen, move_list, go_cmd, ponder=False, ponder_move=None):
+        if not self.alive or not self.proc or self.proc.poll() is not None:
+            await self.start()
         if not self.alive:
             return
         async with self._cmd_lock:
@@ -1351,7 +1433,7 @@ class BridgeOrchestrator:
         if sample_ms <= 0:
             return
         self._latency_ema_ms = 0.75 * self._latency_ema_ms + 0.25 * float(sample_ms)
-        dyn_ovh = int(self._latency_ema_ms * 1.6 + 20)
+        dyn_ovh = max(150, int(self._latency_ema_ms * 1.5 + 100))
         if self.loop:
             asyncio.run_coroutine_threadsafe(self.engine.update_dynamic_overhead(dyn_ovh), self.loop)
 
@@ -1500,7 +1582,7 @@ class BridgeOrchestrator:
         self.move_history.append(uci_move)
 
     async def _start_ponder_on_opponent_turn(self, ponder_uci=None):
-        if self.turn == self.our_color or not ponder_uci:
+        if self.mode == "off" or self.turn == self.our_color or not ponder_uci:
             return
         ponder_history = list(self.move_history) + [ponder_uci]
         go_cmd = self._build_go_command(ponder=True)
@@ -1513,7 +1595,7 @@ class BridgeOrchestrator:
         )
 
     async def _trigger_our_turn_search(self, last_opp_move_uci=None):
-        if self.turn != self.our_color:
+        if self.mode == "off" or self.turn != self.our_color:
             return
         self._pending_move_uci = None
 
@@ -1536,8 +1618,19 @@ class BridgeOrchestrator:
             ponder=False,
         )
 
-    async def handle_external_position(self, fen=None, uci_moves=None, our_color_str=None, turn_str=None, wtime=None, btime=None, inc=None, is_new_game=False):
+    async def handle_external_position(self, fen=None, uci_moves=None, our_color_str=None, turn_str=None, wtime=None, btime=None, inc=None, is_new_game=False, is_game_over=False):
         async with self._lock:
+            if self.mode == "off":
+                if self.engine.is_thinking:
+                    await self.engine.abort_search()
+                return
+
+            if is_game_over:
+                await self.engine.abort_search()
+                self._pending_move_uci = None
+                self._pending_ponder_uci = None
+                return
+
             first_sync = not self._has_synced_state
             self._has_synced_state = True
             self.ext_active_ts = time.monotonic()
@@ -1552,10 +1645,13 @@ class BridgeOrchestrator:
                 self.cv.flipped = True
                 color_changed = True
 
-            if wtime is not None and (wtime > 0 or (btime is not None and btime > 0)):
-                self.wtime_ms = max(0, int(wtime))
-            if btime is not None and (btime > 0 or (wtime is not None and wtime > 0)):
-                self.btime_ms = max(0, int(btime))
+            if wtime is not None and btime is not None and (wtime > 0 or btime > 0):
+                self.wtime_ms = max(1, int(wtime))
+                self.btime_ms = max(1, int(btime))
+            elif wtime is not None and wtime > 0:
+                self.wtime_ms = max(1, int(wtime))
+            elif btime is not None and btime > 0:
+                self.btime_ms = max(1, int(btime))
             if inc is not None and inc >= 0:
                 self.inc_ms = int(inc)
 
@@ -1595,30 +1691,37 @@ class BridgeOrchestrator:
                         self.current_fen = f_tmp
                     changed = True
 
+            detected_mover = None
             if fen_str and not is_start_fen:
                 old_board_part = self.current_fen.split()[0]
                 new_board_part = fen_str.split()[0]
                 if new_board_part != old_board_part:
-                    diff_u = diff_fen_move(self.current_fen, fen_str)
-                    if diff_u:
+                    diff_res = diff_fen_move(self.current_fen, fen_str)
+                    if diff_res:
+                        diff_u, mover_c = diff_res
                         self.move_history.append(diff_u)
                         last_move_uci = diff_u
+                        detected_mover = mover_c
                     else:
-                        diff_u2 = None
+                        diff_res2 = None
                         if self._pending_move_uci:
                             mid_fen = apply_uci_to_fen(self.current_fen, self._pending_move_uci)
-                            diff_u2 = diff_fen_move(mid_fen, fen_str)
-                            if diff_u2:
+                            diff_res2 = diff_fen_move(mid_fen, fen_str)
+                            if diff_res2:
+                                diff_u2, mover_c2 = diff_res2
                                 self.move_history.extend([self._pending_move_uci, diff_u2])
                                 last_move_uci = diff_u2
-                        if not diff_u2:
-                            self.start_fen = fen_str
+                                detected_mover = mover_c2
+                        if not diff_res2:
+                            self.start_fen = sanitize_fen_turn(fen_str, self.our_color)
                             self.move_history.clear()
                             last_move_uci = None
                     self.current_fen = fen_str
                     changed = True
 
-            if turn_str in ("white", "w"):
+            if detected_mover:
+                new_turn = "b" if detected_mover == "w" else "w"
+            elif turn_str in ("white", "w"):
                 new_turn = "w"
             elif turn_str in ("black", "b"):
                 new_turn = "b"
@@ -1677,6 +1780,11 @@ class BridgeOrchestrator:
                         self._pending_move_ts = time.monotonic()
                     else:
                         self._pending_move_retries += 1
+                elif mtype == "game_over":
+                    async with self._lock:
+                        await self.engine.abort_search()
+                        self._pending_move_uci = None
+                        self._pending_ponder_uci = None
                 elif mtype == "state":
                     col = msg.get("color")
                     our_t = msg.get("ourTimeMs")
@@ -1694,6 +1802,7 @@ class BridgeOrchestrator:
                         btime=bt,
                         inc=msg.get("increment"),
                         is_new_game=bool(msg.get("isNewGame", False)),
+                        is_game_over=bool(msg.get("isGameOver", False)),
                     )
         except Exception:
             pass
@@ -1722,7 +1831,7 @@ class BridgeOrchestrator:
     async def cv_loop(self):
         while True:
             await asyncio.sleep(1.0 / max(1, min(60, self.cv.fps)))
-            if self.mode == "ext":
+            if self.mode in ("off", "ext"):
                 continue
             if self.mode == "auto" and self._is_ext_live():
                 continue
@@ -1763,7 +1872,11 @@ class BridgeOrchestrator:
                     sys.stdout.flush()
                     if self._has_synced_state:
                         async with self._lock:
-                            if self.turn == self.our_color:
+                            if self.mode == "off":
+                                await self.engine.abort_search()
+                                self._pending_move_uci = None
+                                self._pending_ponder_uci = None
+                            elif self.turn == self.our_color:
                                 await self._trigger_our_turn_search()
                             elif self.ponder_enabled:
                                 await self._start_ponder_on_opponent_turn(self._pending_ponder_uci or self.engine.ponder_reply)
@@ -1794,7 +1907,7 @@ class BridgeOrchestrator:
         print("   ponder <on|off>          - Toggle UCI ponder")
         print("   assets status            - Show Syzygy status")
         print("   assets sync <4men|5men>  - Download/update Syzygy tables")
-        print("   mode <auto|ext|cv>       - Switch input source")
+        print("   mode <off|auto|ext|cv>   - Set operating mode (off=disabled)")
         print("   mouse <drag|click> <instant|smooth> - Configure CV mouse behavior")
         print("   sync                     - Locate clipboard screenshot on screen")
         print("   autodetect               - Auto-locate 8x8 board on screen")
@@ -1817,8 +1930,13 @@ class BridgeOrchestrator:
 
         if k_low == "autoplay":
             self.cfg["autoplay"] = as_bool
-        elif k_low == "mode" and v_low in ("auto", "ext", "cv"):
-            self.cfg["mode"] = v_low
+        elif k_low == "mode":
+            if v_low in ("on", "1", "true"):
+                v_low = "auto"
+            elif v_low in ("0", "false"):
+                v_low = "off"
+            if v_low in ("off", "auto", "ext", "cv"):
+                self.cfg["mode"] = v_low
         elif k_low == "mouse_action" and v_low in ("drag", "click"):
             self.cfg["mouse_action"] = v_low
         elif k_low == "mouse_speed" and v_low in ("instant", "smooth"):
@@ -1858,7 +1976,11 @@ class BridgeOrchestrator:
 
         if self._has_synced_state:
             async with self._lock:
-                if self.turn == self.our_color:
+                if self.mode == "off":
+                    await self.engine.abort_search()
+                    self._pending_move_uci = None
+                    self._pending_ponder_uci = None
+                elif self.turn == self.our_color:
                     await self._trigger_our_turn_search()
                 elif self.ponder_enabled:
                     await self._start_ponder_on_opponent_turn(self._pending_ponder_uci or self.engine.ponder_reply)

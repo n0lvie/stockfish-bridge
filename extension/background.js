@@ -86,6 +86,7 @@ chrome.runtime.onConnect.addListener((port) => {
   }
   port.onMessage.addListener((msg) => {
     if (msg && msg.type === 'state') lastStateMsg = msg;
+    if (msg && msg.type === 'game_over') lastStateMsg = null;
     if (ws && ws.readyState === WebSocket.OPEN) {
       try { ws.send(JSON.stringify(msg)); } catch (e) {}
     } else {
